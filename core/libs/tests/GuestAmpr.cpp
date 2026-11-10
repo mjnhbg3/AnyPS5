@@ -56,6 +56,58 @@ struct Recorder {
     std::uint32_t Commands() const { return sceAmprCommandBufferGetNumCommands(&buffer); }
 };
 
+void TestBufferBinding() {
+    struct Case {
+        int displacement;
+        std::uint32_t size;
+        bool bound;
+        int result;
+    };
+    const Case cases[]{
+        {0, 4, false, 0}, {0, 8, false, 0}, {4, 4096, false, 0},
+        {0, 0x3fffffc, false, 0}, {0, 0x4000000, false, 0},
+        {0, 0, false, invalidArgument}, {0, 1, false, invalidArgument},
+        {0, 2, false, invalidArgument}, {0, 3, false, invalidArgument},
+        {0, 5, false, invalidArgument}, {0, 0x3ffffff, false, invalidArgument},
+        {0, 0x4000001, false, invalidArgument}, {0, 0x4000004, false, invalidArgument},
+        {0, 0x80000000, false, invalidArgument}, {0, 0xffffffff, false, invalidArgument},
+        {1, 4, false, invalidArgument}, {2, 4, false, invalidArgument},
+        {3, 4, false, invalidArgument}, {-1, 4, false, invalidArgument},
+        {0, 4, true, busy}, {0, 0, true, busy}, {1, 3, true, busy},
+        {-1, 4, true, invalidArgument},
+    };
+    alignas(8) std::array<std::uint8_t, 64> memory;
+    memory.fill(0xa5);
+    for (const auto& test : cases) {
+        struct Guarded {
+            std::uint64_t before;
+            Apr::CommandBufferObject buffer;
+            std::uint64_t after;
+        } guarded{0x1122334455667788, {static_cast<Apr::BufferType>(0xa501), 0x9003, 128, 7, 0, test.bound ? memory.data() + 16 : nullptr}, 0x8877665544332211};
+        auto* const binding = test.displacement < 0 ? nullptr : memory.data() + test.displacement;
+        auto expected = guarded.buffer;
+        if (test.result == 0) {
+            expected.base = binding;
+            expected.size = test.size;
+        }
+        Require(sceAmprCommandBufferSetBuffer(&guarded.buffer, binding, test.size) == test.result);
+        Require(std::memcmp(&guarded.buffer, &expected, sizeof(expected)) == 0);
+        Require(guarded.before == 0x1122334455667788 && guarded.after == 0x8877665544332211);
+        for (const auto byte : memory) Require(byte == 0xa5);
+    }
+    Require(sceAmprCommandBufferSetBuffer(nullptr, memory.data(), 4) == invalidArgument);
+    Require(sceAmprCommandBufferSetBuffer(reinterpret_cast<Apr::CommandBufferObject*>(0x10), nullptr, 4) == invalidArgument);
+    Apr::CommandBufferObject aliased{Apr::BufferType::Apr, 3, 12, 2, 0, nullptr};
+    Require(sceAmprCommandBufferSetBuffer(&aliased, &aliased, 4) == 0);
+    Require(aliased.type == Apr::BufferType::Apr && aliased.recording == 3 && aliased.offset == 12 && aliased.numCommands == 2);
+    Require(aliased.base == reinterpret_cast<std::uint8_t*>(&aliased) && aliased.size == 4);
+    Require(sceAmprCommandBufferSetBuffer(&aliased, memory.data(), 4) == busy);
+    bool threw = false;
+    try { sceAmprCommandBufferSetBuffer(reinterpret_cast<Apr::CommandBufferObject*>(0x10), memory.data(), 4); }
+    catch (const std::exception&) { threw = true; }
+    Require(threw);
+}
+
 std::uint32_t HeaderAt(const Recorder& recorder, std::uint32_t offset) {
     std::uint32_t first;
     std::memcpy(&first, (recorder.buffer.base ? recorder.buffer.base : recorder.memory.data()) + offset, sizeof(first));
@@ -1742,7 +1794,7 @@ void TestAmmSubmitAfterGrowth() {
     const auto measured = static_cast<std::uint32_t>(sceAmprAmmMeasureAmmCommandSizeMap(target, page, 0, cpuReadWrite));
     Recorder exact(measured);
     Require(sceAmprAmmCommandBufferConstructor(&exact.buffer) == 0);
-    Require(sceAmprCommandBufferSetBuffer(&exact.buffer, exact.memory.data(), measured) == 0);
+    Require(sceAmprCommandBufferSetBuffer(&exact.buffer, exact.memory.data(), measured) == busy);
     Require(sceAmprAmmCommandBufferMap(&exact.buffer, target, page, 0, cpuReadWrite) == 0);
     Require(exact.buffer.base == exact.memory.data());
     Require(sceAmprAmmCommandBufferMap(&exact.buffer, target + page, page, 0, cpuReadWrite) == 0);
@@ -1786,6 +1838,10 @@ void TestExpandedBufferLifecycle() {
     Require(buffer.offset == 0 && buffer.numCommands == 0);
     Require(buffer.base != memory1.data());
 
+    const auto bound = buffer;
+    Require(sceAmprCommandBufferSetBuffer(&buffer, memory2.data(), static_cast<std::uint32_t>(memory2.size())) == busy);
+    Require(std::memcmp(&buffer, &bound, sizeof(bound)) == 0);
+    Require(sceAmprCommandBufferClearBuffer(&buffer) == memory1.data());
     Require(sceAmprCommandBufferSetBuffer(&buffer, memory2.data(), static_cast<std::uint32_t>(memory2.size())) == 0);
     Require(buffer.base == memory2.data() && buffer.size == memory2.size());
     Require(buffer.offset == 0);
@@ -1814,6 +1870,7 @@ void TestExpandedBufferLifecycle() {
     Require(buffer.base != memory1.data());
     Require(sceAmprAprCommandBufferDestructor(&buffer, &gather, &scatter) == 0);
 
+    Require(sceAmprCommandBufferClearBuffer(&buffer) == memory1.data());
     Require(sceAmprAmmCommandBufferConstructor(&buffer) == 0);
     Require(sceAmprCommandBufferSetBuffer(&buffer, memory1.data(), static_cast<std::uint32_t>(memory1.size())) == 0);
     Require(sceAmprCommandBufferWriteAddressOnCompletion(&buffer, &done, 10) == 0);
@@ -1876,6 +1933,7 @@ void TestExpandedBufferLifecycle() {
 }
 
 int main() {
+    TestBufferBinding();
     TestRecording("frame");
     TestRecording("");
     TestRecording("1234567");

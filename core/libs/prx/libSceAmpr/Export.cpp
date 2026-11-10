@@ -560,13 +560,18 @@ int APS5_VABI sceAmprCommandBufferReset(Apr::CommandBufferObject* buffer) {
 }
 
 int APS5_VABI sceAmprCommandBufferSetBuffer(Apr::CommandBufferObject* buffer, void* memory, uint32_t size) {
-    if (!buffer) return SCE_KERNEL_ERROR_EINVAL;
-    ReleaseExpandedCommandBuffer(buffer);
+    if (!buffer || !memory) return SCE_KERNEL_ERROR_EINVAL;
+    const auto object = reinterpret_cast<std::uintptr_t>(buffer);
+    if (object > std::numeric_limits<std::uintptr_t>::max() - sizeof(*buffer)) NotImplemented_nid_no_patch(__func__);
+    auto* const baseField = reinterpret_cast<void*>(object + offsetof(Apr::CommandBufferObject, base));
+    std::uint8_t* currentBase = nullptr;
+    if (!GuestCopyIn_nid_no_patch(&currentBase, baseField, sizeof(currentBase))) NotImplemented_nid_no_patch(__func__);
+    if (currentBase) return SCE_KERNEL_ERROR_EBUSY;
+    if ((reinterpret_cast<std::uintptr_t>(memory) & 3u) != 0u || size == 0 || size > 0x4000000u || (size & 3u) != 0u) return SCE_KERNEL_ERROR_EINVAL;
     ReleaseExpandedCommandBufferByOriginalBase(memory);
-    buffer->base = static_cast<uint8_t*>(memory);
-    buffer->size = size;
-    buffer->offset = 0;
-    buffer->numCommands = 0;
+    auto* const newBase = static_cast<std::uint8_t*>(memory);
+    auto* const sizeField = reinterpret_cast<void*>(object + offsetof(Apr::CommandBufferObject, size));
+    if (!GuestCopyOut_nid_no_patch(baseField, &newBase, sizeof(newBase)) || !GuestCopyOut_nid_no_patch(sizeField, &size, sizeof(size))) NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
