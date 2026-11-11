@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgc/Command/include/Packet.hpp"
+#include "prx/libc/include/General.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -157,13 +158,28 @@ std::uint32_t* WriteIndirectRegisters(CommandBuffer* buffer, std::uint32_t opcod
     return Emit(buffer, opcode, {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), 0x80000000u, count}, function);
 }
 
-void PatchIndirectAddress(std::uint32_t* packet, std::uint32_t opcode, const volatile ShaderRegister* registers, const char* function) {
-    ValidatePacket(packet, opcode, 5, function);
-    Require(packet[3] == 0x80000000u && (packet[4] & ~0x3fffu) == 0, function, "invalid indirect register packet");
+int PatchIndirectAddress(std::uint32_t* packet, std::uint32_t opcode, const volatile ShaderRegister* registers, const char* function) {
+    const auto packetAddress = reinterpret_cast<std::uintptr_t>(packet);
+    std::uint8_t actualOpcode;
+    if (!GuestCopyIn_nid_no_patch(&actualOpcode, reinterpret_cast<const void*>(packetAddress + 1), sizeof(actualOpcode))) {
+        NotImplemented_nid_no_patch(function);
+    }
+    if (actualOpcode != opcode) return static_cast<int>(0x8a6c000cu);
+    auto* lowField = reinterpret_cast<void*>(packetAddress + 4);
+    std::uint32_t low;
+    if (!GuestCopyIn_nid_no_patch(&low, lowField, sizeof(low))) {
+        NotImplemented_nid_no_patch(function);
+    }
     const auto address = reinterpret_cast<std::uintptr_t>(registers);
-    CheckAddress(address, 4, function);
-    packet[1] = static_cast<std::uint32_t>(address);
-    packet[2] = static_cast<std::uint32_t>(address >> 32u);
+    low = (low & 3u) | (static_cast<std::uint32_t>(address) & ~3u);
+    if (!GuestCopyOut_nid_no_patch(lowField, &low, sizeof(low))) {
+        NotImplemented_nid_no_patch(function);
+    }
+    const auto high = static_cast<std::uint32_t>(address >> 32u);
+    if (!GuestCopyOut_nid_no_patch(reinterpret_cast<void*>(packetAddress + 8), &high, sizeof(high))) {
+        NotImplemented_nid_no_patch(function);
+    }
+    return 0;
 }
 
 void PatchIndirectCount(std::uint32_t* packet, std::uint32_t opcode, std::uint32_t count, const char* function) {

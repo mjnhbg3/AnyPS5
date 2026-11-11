@@ -649,9 +649,12 @@ void testRegisters() {
     auto* packet = Agc::Command::WriteIndirectRegisters(&storage.buffer, 0x63u, registers.data(), 0x3ffeu, __func__);
     Agc::Command::PatchIndirectCount(packet, 0x63u, 1, __func__);
     check(packet[4] == 0x3fffu, "indirect register count mismatch");
+    packet[1] |= 3u;
+    Agc::Command::PatchIndirectAddress(packet, 0x63u, registers.data(), __func__);
+    check((packet[1] & 3u) == 3u, "indirect address patch did not preserve the low two bits");
     const auto before = storage.words;
     expectFailure([&] { Agc::Command::PatchIndirectCount(packet, 0x63u, 1, __func__); });
-    expectFailure([&] { Agc::Command::PatchIndirectAddress(packet, 0x64u, registers.data(), __func__); });
+    Agc::Command::PatchIndirectAddress(packet, 0x64u, registers.data(), __func__);
     check(storage.words == before, "invalid indirect patch modified memory");
 }
 

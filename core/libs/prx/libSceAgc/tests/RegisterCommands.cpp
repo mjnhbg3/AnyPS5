@@ -176,6 +176,46 @@ void testIndirectPlaceholder() {
     }
 }
 
+void testIndirectAddressPatches() {
+    const std::array setters{sceAgcSetCxRegIndirectPatchSetAddress, sceAgcSetShRegIndirectPatchSetAddress, sceAgcSetUcRegIndirectPatchSetAddress};
+    const std::array opcodes{0x9fu, 0x63u, 0x64u};
+    const std::array<std::uintptr_t, 4> addresses{0x123456789abcu, 0, 3, 0xfedcba9876543211u};
+    for (std::size_t kind = 0; kind < setters.size(); ++kind) {
+        for (std::size_t row = 0; row < addresses.size(); ++row) {
+            const auto lowBits = 3u - static_cast<std::uint32_t>(row);
+            std::array<std::uint32_t, 6> words{Agc::Command::Header(opcodes[kind], 5), 0xabcdef00u | lowBits, 0xa5a5a5a5u, 0x80000000u, 2u, 0xfacecafeu};
+            if (row != 0) {
+                words[0] = 0xa5f0007du | (opcodes[kind] << 8u);
+                words[3] = 0x76543210u;
+                words[4] = 0xfedcba98u;
+            }
+            auto expected = words;
+            expected[1] = (static_cast<std::uint32_t>(addresses[row]) & ~3u) | lowBits;
+            expected[2] = static_cast<std::uint32_t>(addresses[row] >> 32u);
+            const auto* registers = reinterpret_cast<const volatile ShaderRegister*>(addresses[row]);
+            check(setters[kind](words.data(), registers) == 0 && words == expected, "indirect address patch did not preserve the low bits and unrelated packet fields");
+            const auto before = words;
+            check(setters[(kind + 1) % setters.size()](words.data(), registers) == static_cast<int>(0x8a6c000cu), "wrong indirect opcode did not return the packet error");
+            check(words == before, "wrong indirect opcode modified the packet");
+        }
+
+        alignas(8) std::array<unsigned char, 32> bytes{};
+        bytes.fill(0xa5);
+        std::array<std::uint32_t, 5> words{opcodes[kind] << 8u, 0xabcdef02u, 0x76543210u, 0x13579bdfu, 0x2468ace0u};
+        std::memcpy(bytes.data() + 1, words.data(), sizeof(words));
+        auto expected = bytes;
+        words[1] = 0x76543212u;
+        words[2] = 0xfedcba98u;
+        std::memcpy(expected.data() + 1, words.data(), sizeof(words));
+        check(setters[kind](reinterpret_cast<std::uint32_t*>(bytes.data() + 1), reinterpret_cast<const volatile ShaderRegister*>(std::uintptr_t{0xfedcba9876543211u})) == 0,
+              "unaligned indirect address patch was rejected");
+        check(bytes == expected, "unaligned indirect address patch changed surrounding bytes");
+        for (const auto invalid : {std::uintptr_t{0}, std::uintptr_t{1}, ~std::uintptr_t{0}}) {
+            expectFailure([&] { setters[kind](reinterpret_cast<std::uint32_t*>(invalid), nullptr); });
+        }
+    }
+}
+
 void testDirectList() {
     constexpr std::uint32_t sentinel = 0xabcdef01u;
     constexpr std::uint32_t wordSize = sizeof(std::uint32_t);
@@ -237,6 +277,7 @@ int main() {
         testListFromAnyByte();
         testIndirect();
         testIndirectPlaceholder();
+        testIndirectAddressPatches();
         testDirectList();
         std::puts("AGC register command tests passed");
         return 0;
