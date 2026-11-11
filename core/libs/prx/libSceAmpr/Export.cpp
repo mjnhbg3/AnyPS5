@@ -565,9 +565,17 @@ int APS5_VABI sceAmprCommandBufferPushMarkerWithColor(Apr::CommandBufferObject* 
 }
 
 int APS5_VABI sceAmprCommandBufferReset(Apr::CommandBufferObject* buffer) {
-    if (!buffer) return SCE_KERNEL_ERROR_EINVAL;
-    buffer->offset = 0;
-    buffer->numCommands = 0;
+    if (!buffer) return SCE_KERNEL_ERROR_EPERM;
+    const auto object = reinterpret_cast<std::uintptr_t>(buffer);
+    if (object > std::numeric_limits<std::uintptr_t>::max() - sizeof(*buffer)) NotImplemented_nid_no_patch(__func__);
+    const auto* baseField = reinterpret_cast<const void*>(object + offsetof(Apr::CommandBufferObject, base));
+    std::uint8_t* base = nullptr;
+    if (!GuestCopyIn_nid_no_patch(&base, baseField, sizeof(base))) NotImplemented_nid_no_patch(__func__);
+    if (!base) return SCE_KERNEL_ERROR_EPERM;
+    const std::uint32_t zero = 0;
+    auto* offsetField = reinterpret_cast<void*>(object + offsetof(Apr::CommandBufferObject, offset));
+    auto* countField = reinterpret_cast<void*>(object + offsetof(Apr::CommandBufferObject, numCommands));
+    if (!GuestCopyOut_nid_no_patch(offsetField, &zero, sizeof(zero)) || !GuestCopyOut_nid_no_patch(countField, &zero, sizeof(zero))) NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 

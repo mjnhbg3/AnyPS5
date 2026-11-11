@@ -150,7 +150,7 @@ void TestRejectedArguments() {
     Require(sceAmprCommandBufferConstructor(reinterpret_cast<Apr::CommandBufferObject*>(0x10)) == invalidPointer);
     Require(sceAmprAprCommandBufferConstructor(&recorder.buffer, reinterpret_cast<std::uint64_t*>(0x10), &scatterState) == invalidPointer);
     Require(sceAmprAprCommandBufferConstructor(&recorder.buffer, &gatherState, reinterpret_cast<std::uint64_t*>(0x10)) == invalidPointer);
-    Require(sceAmprCommandBufferReset(nullptr) == invalidArgument);
+    Require(sceAmprCommandBufferReset(nullptr) == permissionDenied);
     Require(sceAmprCommandBufferSetBuffer(nullptr, memory.data(), memory.size()) == invalidArgument);
     alignas(8) std::uint64_t target = 0;
     Require(sceAmprCommandBufferWriteAddress_04_00(nullptr, &target, 0x1122334455667788ull, 0) == invalidArgument);
@@ -160,6 +160,52 @@ void TestRejectedArguments() {
     Require(sceAmprCommandBufferGetNumCommands(nullptr) == 0);
     Require(sceAmprCommandBufferGetSize(nullptr) == 0);
     Require(sceAmprCommandBufferGetType(nullptr) == 0);
+}
+
+void TestResetBinding() {
+    std::array<std::uint8_t, 64> memory;
+    memory.fill(0xa5);
+    const auto original = memory;
+    for (auto* base : {static_cast<std::uint8_t*>(nullptr), memory.data(), reinterpret_cast<std::uint8_t*>(1)}) {
+        for (const auto size : {0u, 64u, std::numeric_limits<std::uint32_t>::max()}) {
+            struct Guarded {
+                std::uint64_t before;
+                Apr::CommandBufferObject buffer;
+                std::uint64_t after;
+            } guarded{0x123456789abcdef0ull, {Apr::BufferType::Apr, 0xa503, 128, 7, size, base}, 0xfedcba9876543210ull};
+            auto expected = guarded;
+            if (base) {
+                expected.buffer.offset = 0;
+                expected.buffer.numCommands = 0;
+            }
+            Require(sceAmprCommandBufferReset(&guarded.buffer) == (base ? 0 : permissionDenied));
+            Require(std::memcmp(&guarded, &expected, sizeof(guarded)) == 0);
+            Require(memory == original);
+            Require(sceAmprCommandBufferReset(&guarded.buffer) == (base ? 0 : permissionDenied));
+            Require(std::memcmp(&guarded, &expected, sizeof(guarded)) == 0);
+        }
+    }
+    Apr::CommandBufferObject buffer{};
+    Require(sceAmprCommandBufferConstructor(&buffer) == 0);
+    Require(sceAmprCommandBufferReset(&buffer) == permissionDenied);
+    buffer.base = reinterpret_cast<std::uint8_t*>(&buffer);
+    buffer.offset = 32;
+    buffer.numCommands = 4;
+    Require(sceAmprCommandBufferReset(&buffer) == 0);
+    Require(buffer.base == reinterpret_cast<std::uint8_t*>(&buffer));
+    Require(buffer.offset == 0 && buffer.numCommands == 0);
+}
+
+void TestResetInvalidDescriptor() {
+    for (const auto address : {std::uintptr_t{0x10}, std::numeric_limits<std::uintptr_t>::max()}) {
+        bool threw = false;
+        try {
+            sceAmprCommandBufferReset(reinterpret_cast<Apr::CommandBufferObject*>(address));
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        Require(threw);
+    }
 }
 
 void TestFullBuffer() {
@@ -1908,6 +1954,8 @@ void TestConstructNopPayloadIntoBuffer() {
 }
 
 int main() {
+    TestResetBinding();
+    TestResetInvalidDescriptor();
     TestRecording("frame");
     TestRecording("");
     TestRecording("1234567");
