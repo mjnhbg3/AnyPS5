@@ -715,10 +715,14 @@ void testPacketPayloadAddress() {
     check(sceAgcGetDataPacketPayloadAddress_0090(&payload, packet, 0) == 0 && payload == nullptr, "empty payload marker was not recognized");
     check(sceAgcGetDataPacketPayloadAddress_0090(&payload, packet, -1) == 0 && payload == packet + 2, "nonzero payload type did not skip two words");
     expectFailure([&] { sceAgcGetDataPacketPayloadAddress_0090(nullptr, packet, 1); });
-    expectFailure([&] { sceAgcGetDataPacketPayloadAddress_0090(&payload, nullptr, 1); });
+    check(sceAgcGetDataPacketPayloadAddress_0090(&payload, nullptr, 1) == 0 && reinterpret_cast<std::uintptr_t>(payload) == 8,
+          "nonzero payload type rejected a null packet");
     auto* misaligned = reinterpret_cast<std::uint32_t*>(reinterpret_cast<unsigned char*>(packet) + 1);
-    expectFailure([&] { sceAgcGetDataPacketPayloadAddress_0090(&payload, misaligned, 0); });
-    check(payload == packet + 2, "invalid packet changed output address");
+    const std::uint32_t header = 0xc0047600u;
+    std::memcpy(misaligned, &header, sizeof(header));
+    check(sceAgcGetDataPacketPayloadAddress_0090(&payload, misaligned, 0) == 0 &&
+          reinterpret_cast<std::uintptr_t>(payload) == reinterpret_cast<std::uintptr_t>(misaligned) + sizeof(header),
+          "generic payload address rejected an unaligned packet");
 }
 
 void testMemory() {

@@ -5,6 +5,8 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <tuple>
 
@@ -47,6 +49,48 @@ void testRanges() {
     }
 }
 
+void testAddresses() {
+    for (auto query : {sceAgcGetDataPacketPayloadAddress_0090, sceAgcGetDataPacketPayloadAddress}) {
+        const std::array<std::tuple<std::uintptr_t, int, std::uintptr_t>, 4> unreadable{{
+            {0, 1, 8}, {1, -1, 9}, {std::numeric_limits<std::uintptr_t>::max() - 3, std::numeric_limits<int>::min(), 4},
+            {std::numeric_limits<std::uintptr_t>::max(), std::numeric_limits<int>::max(), 7}}};
+        for (const auto& [input, type, expected] : unreadable) {
+            std::uint32_t* address = nullptr;
+            check(query(&address, reinterpret_cast<std::uint32_t*>(input), type) == 0, "nonzero payload type read the packet");
+            check(reinterpret_cast<std::uintptr_t>(address) == expected, "nonzero payload type address mismatch");
+        }
+
+        const std::array<std::tuple<std::uint32_t, std::size_t, std::size_t, int>, 6> rows{{
+            {0, 8, 32, 0}, {0x3ffe0000u, 9, 33, 0}, {0x3fff0000u, 9, 33, 0},
+            {0xffff1000u, 8, 8, 0}, {0x12345678u, 9, 10, 0}, {0x3fff0000u, 9, 33, -1}}};
+        for (const auto& [header, inputOffset, outputOffset, type] : rows) {
+            alignas(8) std::array<unsigned char, 48> storage{};
+            storage.fill(0xa5);
+            std::memcpy(storage.data() + inputOffset, &header, sizeof(header));
+            auto expected = storage;
+            auto* input = reinterpret_cast<std::uint32_t*>(storage.data() + inputOffset);
+            auto* output = reinterpret_cast<std::uint32_t**>(storage.data() + outputOffset);
+            std::uint32_t* address = nullptr;
+            if (type != 0 || (header & 0x3fff0000u) != 0x3fff0000u) {
+                address = reinterpret_cast<std::uint32_t*>(reinterpret_cast<std::uintptr_t>(input) + (type != 0 ? 8u : 4u));
+            }
+            std::memcpy(expected.data() + outputOffset, &address, sizeof(address));
+            check(query(output, input, type) == 0, "unaligned or overlapping payload address query failed");
+            check(storage == expected, "payload address query read or wrote overlapping storage incorrectly");
+        }
+
+        std::array<std::uint32_t, 2> words{0xc0047600u, 0x12345678u};
+        const auto before = words;
+        for (auto invalid : {std::uintptr_t{0}, std::uintptr_t{1}, std::numeric_limits<std::uintptr_t>::max()}) {
+            auto* address = words.data();
+            expectFailure([&] { query(&address, reinterpret_cast<std::uint32_t*>(invalid), 0); });
+            check(address == words.data(), "unreadable packet modified output address");
+            expectFailure([&] { query(reinterpret_cast<std::uint32_t**>(invalid), words.data(), 1); });
+            check(words == before, "unwritable payload output modified the packet");
+        }
+    }
+}
+
 void testRejections() {
     std::array<std::uint32_t, 2> words{0xc0047600u, 0u};
     SceAgcMemoryRange range{};
@@ -60,10 +104,6 @@ void testRejections() {
         misalignedRange = reinterpret_cast<SceAgcMemoryRange*>(storage.data() + 2);
     }
     expectFailure([&] { sceAgcGetDataPacketPayloadRange(misalignedRange, words.data(), 1); });
-    std::uint32_t* address = nullptr;
-    expectFailure([&] { sceAgcGetDataPacketPayloadAddress(nullptr, words.data(), 1); });
-    expectFailure([&] { sceAgcGetDataPacketPayloadAddress(&address, nullptr, 1); });
-    expectFailure([&] { sceAgcGetDataPacketPayloadAddress(&address, misaligned, 0); });
 }
 
 }
@@ -71,6 +111,7 @@ void testRejections() {
 int main() {
     try {
         testRanges();
+        testAddresses();
         testRejections();
         LibcRunShutdown_nid_postfix();
         std::puts("AGC payload range tests passed");

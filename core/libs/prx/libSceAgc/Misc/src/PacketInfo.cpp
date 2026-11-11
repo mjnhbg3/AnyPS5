@@ -18,13 +18,16 @@ uint32_t APS5_VABI sceAgcGetPacketSize(uint32_t* packet) {
 }
 
 int APS5_VABI sceAgcGetDataPacketPayloadAddress_0090(uint32_t** addr, uint32_t* cmd, int type) {
-    Agc::Command::CheckAddress(reinterpret_cast<std::uintptr_t>(addr), alignof(uint32_t*), __func__);
-    Agc::Command::CheckAddress(reinterpret_cast<std::uintptr_t>(cmd), alignof(uint32_t), __func__);
+    auto payload = reinterpret_cast<std::uintptr_t>(cmd);
     if (type != 0) {
-        *addr = cmd + 2;
+        payload += 2 * sizeof(std::uint32_t);
     } else {
-        *addr = (~cmd[0] & 0x3fff0000u) != 0 ? cmd + 1 : nullptr;
+        std::uint32_t header = 0;
+        if (!GuestCopyIn_nid_no_patch(&header, cmd, sizeof(header))) NotImplemented_nid_no_patch(__func__);
+        payload = (header & 0x3fff0000u) == 0x3fff0000u ? 0 : payload + sizeof(std::uint32_t);
     }
+    auto* result = reinterpret_cast<std::uint32_t*>(payload);
+    if (!GuestCopyOut_nid_no_patch(addr, &result, sizeof(result))) NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
