@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgc/Command/include/Packet.hpp"
+#include "prx/libc/include/General.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -166,10 +167,24 @@ void PatchIndirectAddress(std::uint32_t* packet, std::uint32_t opcode, const vol
     packet[2] = static_cast<std::uint32_t>(address >> 32u);
 }
 
-void PatchIndirectCount(std::uint32_t* packet, std::uint32_t opcode, std::uint32_t count, const char* function) {
-    ValidatePacket(packet, opcode, 5, function);
-    Require(packet[3] == 0x80000000u && packet[4] <= 0x3fffu && count <= 0x3fffu - packet[4], function, "indirect register count overflow or invalid packet");
-    packet[4] += count;
+int PatchIndirectCount(std::uint32_t* packet, std::uint32_t opcode, std::uint32_t count, const char* function) {
+    const auto address = reinterpret_cast<std::uintptr_t>(packet);
+    std::uint8_t actualOpcode;
+    if (!GuestCopyIn_nid_no_patch(&actualOpcode, reinterpret_cast<const void*>(address + 1), sizeof(actualOpcode))) {
+        NotImplemented_nid_no_patch(function);
+    }
+    if (actualOpcode != opcode) return static_cast<int>(0x8a6c000cu);
+    auto* field = reinterpret_cast<void*>(address + 12);
+    std::uint64_t value;
+    if (!GuestCopyIn_nid_no_patch(&value, field, sizeof(value))) {
+        NotImplemented_nid_no_patch(function);
+    }
+    const auto nextCount = (static_cast<std::uint32_t>(value >> 32u) + count) & 0x3fffu;
+    value = (value & ~(std::uint64_t{0x3fff} << 32u)) | (static_cast<std::uint64_t>(nextCount) << 32u);
+    if (!GuestCopyOut_nid_no_patch(field, &value, sizeof(value))) {
+        NotImplemented_nid_no_patch(function);
+    }
+    return 0;
 }
 
 void SetIndirectCount(std::uint32_t* packet, std::uint32_t opcode, std::uint32_t count, const char* function) {

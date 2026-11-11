@@ -649,8 +649,9 @@ void testRegisters() {
     auto* packet = Agc::Command::WriteIndirectRegisters(&storage.buffer, 0x63u, registers.data(), 0x3ffeu, __func__);
     Agc::Command::PatchIndirectCount(packet, 0x63u, 1, __func__);
     check(packet[4] == 0x3fffu, "indirect register count mismatch");
+    Agc::Command::PatchIndirectCount(packet, 0x63u, 1, __func__);
+    check(packet[4] == 0, "indirect register count did not wrap to zero");
     const auto before = storage.words;
-    expectFailure([&] { Agc::Command::PatchIndirectCount(packet, 0x63u, 1, __func__); });
     expectFailure([&] { Agc::Command::PatchIndirectAddress(packet, 0x64u, registers.data(), __func__); });
     check(storage.words == before, "invalid indirect patch modified memory");
 }
@@ -659,16 +660,39 @@ void testIndirectRegisterPatches() {
     using AddRegisters = int (APS5_VABI *)(std::uint32_t*, std::uint32_t);
     const std::array<ShaderRegister, 2> registers{{{0x10, 7}, {0x11, 8}}};
     const std::array<std::pair<std::uint32_t, AddRegisters>, 3> kinds{{{0x9fu, sceAgcSetCxRegIndirectPatchAddRegisters}, {0x63u, sceAgcSetShRegIndirectPatchAddRegisters}, {0x64u, sceAgcSetUcRegIndirectPatchAddRegisters}}};
+    const std::array<std::array<std::uint32_t, 3>, 5> counts{{
+        {1u, 0x4000u, 1u}, {0xabcdc123u, 0u, 0xabcdc123u}, {0xabcdc123u, 0x4001u, 0xabcdc124u},
+        {0xfffffff0u, 0x30u, 0xffffc020u}, {0x12343fffu, 0xffffffffu, 0x12343ffeu}}};
     for (std::size_t i = 0; i < kinds.size(); ++i) {
         Storage storage;
         auto* packet = Agc::Command::WriteIndirectRegisters(&storage.buffer, kinds[i].first, registers.data(), 2, __func__);
         check(kinds[i].second(packet, 3) == 0 && packet[4] == 5, "indirect register patch did not add to the count");
         check(kinds[i].second(packet, 0x3fffu - 5u) == 0 && packet[4] == 0x3fffu, "indirect register patch did not reach the largest count");
+        check(kinds[i].second(packet, 1) == 0 && packet[4] == 0, "indirect register patch did not wrap the count");
         const auto before = storage.words;
-        expectFailure([&] { kinds[i].second(packet, 1); });
-        check(storage.words == before, "an overflowing indirect register patch modified the packet");
-        expectFailure([&] { kinds[(i + 1) % kinds.size()].second(packet, 1); });
+        check(kinds[(i + 1) % kinds.size()].second(packet, 1) == static_cast<int>(0x8a6c000cu), "wrong indirect opcode did not return the packet error");
         check(storage.words == before, "an indirect register patch of another packet kind modified the packet");
+
+        for (const auto& row : counts) {
+            std::array<std::uint32_t, 6> words{0xa5f0007du | (kinds[i].first << 8u), 0x11223344u, 0x55667788u, 0x76543210u, row[0], 0xa55a5aa5u};
+            auto expected = words;
+            expected[4] = row[2];
+            check(kinds[i].second(words.data(), row[1]) == 0 && words == expected, "indirect count patch did not preserve unrelated fields or wrap at 14 bits");
+        }
+
+        alignas(8) std::array<unsigned char, 40> bytes{};
+        bytes.fill(0xa5);
+        std::array<std::uint32_t, 6> unaligned{kinds[i].first << 8u, 0x11223344u, 0x55667788u, 0x76543210u, 0xabcdc123u, 0xa55a5aa5u};
+        std::memcpy(bytes.data() + 1, unaligned.data(), sizeof(unaligned));
+        auto expected = bytes;
+        unaligned[4] = 0xabcdc124u;
+        std::memcpy(expected.data() + 1, unaligned.data(), sizeof(unaligned));
+        check(kinds[i].second(reinterpret_cast<std::uint32_t*>(bytes.data() + 1), 1) == 0 && bytes == expected,
+              "unaligned indirect count patch changed surrounding bytes");
+
+        for (const auto invalid : {std::uintptr_t{0}, std::uintptr_t{1}, ~std::uintptr_t{0}}) {
+            expectFailure([&] { kinds[i].second(reinterpret_cast<std::uint32_t*>(invalid), 1); });
+        }
     }
 }
 

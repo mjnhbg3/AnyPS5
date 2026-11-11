@@ -10,8 +10,7 @@
 extern "C" {
 
 int APS5_VABI sceAgcSetCxRegIndirectPatchAddRegisters(std::uint32_t* cmd, std::uint32_t numRegs) {
-    Agc::Command::PatchIndirectCount(cmd, 0x9fu, numRegs, __func__);
-    return 0;
+    return Agc::Command::PatchIndirectCount(cmd, 0x9fu, numRegs, __func__);
 }
 
 int APS5_VABI sceAgcSetCxRegIndirectPatchSetAddress(std::uint32_t* cmd, const volatile ShaderRegister* regs) {
@@ -25,8 +24,7 @@ int APS5_VABI sceAgcSetCxRegIndirectPatchSetNumRegisters(std::uint32_t* cmd, std
 }
 
 int APS5_VABI sceAgcSetShRegIndirectPatchAddRegisters(std::uint32_t* cmd, std::uint32_t numRegs) {
-    Agc::Command::PatchIndirectCount(cmd, 0x63u, numRegs, __func__);
-    return 0;
+    return Agc::Command::PatchIndirectCount(cmd, 0x63u, numRegs, __func__);
 }
 
 int APS5_VABI sceAgcSetShRegIndirectPatchSetAddress(std::uint32_t* cmd, const volatile ShaderRegister* regs) {
@@ -40,8 +38,7 @@ int APS5_VABI sceAgcSetShRegIndirectPatchSetNumRegisters(std::uint32_t* cmd, std
 }
 
 int APS5_VABI sceAgcSetUcRegIndirectPatchAddRegisters(std::uint32_t* cmd, std::uint32_t numRegs) {
-    Agc::Command::PatchIndirectCount(cmd, 0x64u, numRegs, __func__);
-    return 0;
+    return Agc::Command::PatchIndirectCount(cmd, 0x64u, numRegs, __func__);
 }
 
 int APS5_VABI sceAgcSetUcRegIndirectPatchSetAddress(std::uint32_t* cmd, const volatile ShaderRegister* regs) {
