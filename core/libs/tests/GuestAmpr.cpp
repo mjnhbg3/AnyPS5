@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -577,9 +578,102 @@ void TestClearBuffer() {
     Require(sceAmprCommandBufferGetBufferBaseAddress(&recorder.buffer) == recorder.buffer.base);
     Require(sceAmprCommandBufferNop(&recorder.buffer, 1) == 0);
     Require(recorder.Offset() != 0 && recorder.Commands() == 1);
+    auto expected = recorder.buffer;
+    const auto backing = recorder.memory;
+    expected.base = nullptr;
+    expected.size = 0;
     Require(sceAmprCommandBufferClearBuffer(&recorder.buffer) == recorder.memory.data());
-    Require(recorder.buffer.base == nullptr && recorder.buffer.size == 0 && recorder.Offset() == 0 && recorder.Commands() == 0);
+    Require(std::memcmp(&recorder.buffer, &expected, sizeof(expected)) == 0);
+    Require(recorder.memory == backing);
     Require(sceAmprCommandBufferClearBuffer(&recorder.buffer) == nullptr);
+    Require(std::memcmp(&recorder.buffer, &expected, sizeof(expected)) == 0);
+
+    struct ClearCase {
+        std::uint32_t size;
+        std::uint8_t* base;
+    };
+    const std::array<ClearCase, 8> cases{{
+        {0, nullptr},
+        {0, recorder.memory.data()},
+        {0, reinterpret_cast<std::uint8_t*>(1)},
+        {1, nullptr},
+        {std::numeric_limits<std::uint32_t>::max(), nullptr},
+        {1, recorder.memory.data() + 1},
+        {32, recorder.memory.data()},
+        {std::numeric_limits<std::uint32_t>::max(), reinterpret_cast<std::uint8_t*>(1)}
+    }};
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+        Apr::CommandBufferObject buffer{};
+        buffer.type = static_cast<Apr::BufferType>(0xFFF8u + index);
+        buffer.recording = static_cast<std::uint16_t>(0xA5F0u + index);
+        buffer.offset = 0xFFFFFFF8u + static_cast<std::uint32_t>(index);
+        buffer.numCommands = 0xA55A1234u + static_cast<std::uint32_t>(index);
+        buffer.size = cases[index].size;
+        buffer.base = cases[index].base;
+        expected = buffer;
+        void* result = nullptr;
+        if (buffer.size != 0 && buffer.base != nullptr) {
+            result = buffer.base;
+            expected.size = 0;
+            expected.base = nullptr;
+        }
+        Require(sceAmprCommandBufferClearBuffer(&buffer) == result);
+        Require(std::memcmp(&buffer, &expected, sizeof(expected)) == 0);
+        Require(sceAmprCommandBufferClearBuffer(&buffer) == nullptr);
+        Require(std::memcmp(&buffer, &expected, sizeof(expected)) == 0);
+        Require(recorder.memory == backing);
+    }
+
+    Apr::CommandBufferObject alias = recorder.buffer;
+    alias.size = sizeof(alias);
+    alias.base = reinterpret_cast<std::uint8_t*>(&alias);
+    expected = alias;
+    expected.size = 0;
+    expected.base = nullptr;
+    Require(sceAmprCommandBufferClearBuffer(&alias) == &alias);
+    Require(std::memcmp(&alias, &expected, sizeof(expected)) == 0);
+
+    constexpr std::size_t page = 0x4000;
+    void* mapped = nullptr;
+    Require(sceKernelMapFlexibleMemory(&mapped, page * 2, 3, 0) == 0 && mapped != nullptr);
+    auto* bytes = static_cast<std::uint8_t*>(mapped);
+    std::memset(bytes, 0xA5, page);
+    auto* partial = reinterpret_cast<Apr::CommandBufferObject*>(bytes + page - offsetof(Apr::CommandBufferObject, base));
+    std::uint32_t size = 0;
+    std::memcpy(bytes + page - sizeof(size), &size, sizeof(size));
+    std::array<std::uint8_t, offsetof(Apr::CommandBufferObject, base)> prefix{};
+    std::memcpy(prefix.data(), partial, prefix.size());
+    Require(sceKernelMprotect(bytes + page, page, 0) == 0);
+    Require(sceKernelMprotect(bytes, page, 1) == 0);
+    Require(sceAmprCommandBufferClearBuffer(partial) == nullptr);
+    Require(std::memcmp(prefix.data(), partial, prefix.size()) == 0);
+    Require(sceKernelMprotect(bytes, page, 3) == 0);
+
+    Apr::CommandBufferObject readonly = alias;
+    readonly.size = 1;
+    readonly.base = recorder.memory.data();
+    std::memcpy(bytes, &readonly, sizeof(readonly));
+    Require(sceKernelMprotect(bytes, page, 1) == 0);
+    bool rejected = false;
+    try {
+        sceAmprCommandBufferClearBuffer(reinterpret_cast<Apr::CommandBufferObject*>(bytes));
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    Require(rejected);
+    Require(std::memcmp(bytes, &readonly, sizeof(readonly)) == 0);
+    Require(sceKernelMprotect(bytes, page, 3) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(mapped), page * 2) == 0);
+
+    for (auto* invalid : {static_cast<Apr::CommandBufferObject*>(nullptr), reinterpret_cast<Apr::CommandBufferObject*>(mapped), reinterpret_cast<Apr::CommandBufferObject*>(std::numeric_limits<std::uintptr_t>::max() - 7)}) {
+        rejected = false;
+        try {
+            sceAmprCommandBufferClearBuffer(invalid);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        Require(rejected);
+    }
 }
 
 void TestConstructed() {
@@ -1803,14 +1897,37 @@ void TestExpandedBufferLifecycle() {
     Require(buffer.base == memory2.data());
     Require(sceAmprCommandBufferWriteAddressOnCompletion(&buffer, &done, 5) == 0);
     Require(buffer.base != memory2.data());
+    const auto expanded = buffer;
+    std::array<std::uint8_t, 2 * sizeof(Apr::WriteAddressCommand)> recorded{};
+    std::memcpy(recorded.data(), buffer.base, recorded.size());
+    buffer.size = 0;
+    auto expected = buffer;
+    Require(sceAmprCommandBufferClearBuffer(&buffer) == nullptr);
+    Require(std::memcmp(&buffer, &expected, sizeof(expected)) == 0);
+    buffer.size = expanded.size;
+    buffer.base = nullptr;
+    expected = buffer;
+    Require(sceAmprCommandBufferClearBuffer(&buffer) == nullptr);
+    Require(std::memcmp(&buffer, &expected, sizeof(expected)) == 0);
+    buffer.base = expanded.base;
+    Require(std::memcmp(recorded.data(), buffer.base, recorded.size()) == 0);
+    expected = expanded;
+    expected.base = nullptr;
+    expected.size = 0;
     void* cleared = sceAmprCommandBufferClearBuffer(&buffer);
     Require(cleared == memory2.data());
-    Require(buffer.base == nullptr && buffer.size == 0 && buffer.offset == 0);
+    Require(std::memcmp(&buffer, &expected, sizeof(expected)) == 0);
+    Require(sceAmprCommandBufferClearBuffer(&buffer) == nullptr);
+    Require(std::memcmp(&buffer, &expected, sizeof(expected)) == 0);
 
     Require(sceAmprCommandBufferSetBuffer(&buffer, memory1.data(), static_cast<std::uint32_t>(memory1.size())) == 0);
+    Require(sceAmprCommandBufferReset(&buffer) == 0);
     Require(sceAmprCommandBufferWriteAddressOnCompletion(&buffer, &done, 6) == 0);
     Require(sceAmprCommandBufferWriteAddressOnCompletion(&buffer, &done, 7) == 0);
     Require(buffer.base != memory1.data());
+    std::uint32_t reboundSubmitId = 0;
+    Require(sceAmprAmmSubmitCommandBuffer3(memory1.data(), buffer.offset, 0, &reboundSubmitId) == 0 && reboundSubmitId != 0);
+    Require(sceAmprAmmWaitCommandBufferCompletion(reboundSubmitId) == 0 && done == 7);
     Require(sceAmprCommandBufferConstructor(&buffer) == 0);
     Require(buffer.base == nullptr && buffer.size == 0);
 

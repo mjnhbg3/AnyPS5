@@ -461,12 +461,27 @@ int APS5_VABI sceAmprAprCommandBufferResetGatherScatterState(Apr::CommandBufferO
 }
 
 void* APS5_VABI sceAmprCommandBufferClearBuffer(Apr::CommandBufferObject* buffer) {
-    void* memory = buffer->base;
-    if (ReleaseExpandedCommandBuffer(buffer)) memory = buffer->base;
-    buffer->base = nullptr;
-    buffer->size = 0;
-    buffer->offset = 0;
-    buffer->numCommands = 0;
+    const auto address = reinterpret_cast<std::uintptr_t>(buffer);
+    if (!buffer || address > std::numeric_limits<std::uintptr_t>::max() - offsetof(Apr::CommandBufferObject, size)) NotImplemented_nid_no_patch(__func__);
+    auto* sizePointer = reinterpret_cast<std::uint32_t*>(address + offsetof(Apr::CommandBufferObject, size));
+    std::uint32_t size = 0;
+    if (!GuestCopyIn_nid_no_patch(&size, sizePointer, sizeof(size))) NotImplemented_nid_no_patch(__func__);
+    if (size == 0) return nullptr;
+    if (address > std::numeric_limits<std::uintptr_t>::max() - offsetof(Apr::CommandBufferObject, base)) NotImplemented_nid_no_patch(__func__);
+    auto* basePointer = reinterpret_cast<std::uint8_t**>(address + offsetof(Apr::CommandBufferObject, base));
+    std::uint8_t* memory = nullptr;
+    if (!GuestCopyIn_nid_no_patch(&memory, basePointer, sizeof(memory))) NotImplemented_nid_no_patch(__func__);
+    if (!memory) return nullptr;
+    std::uint8_t* const emptyBase = nullptr;
+    const std::uint32_t emptySize = 0;
+    if (!GuestCopyOut_nid_no_patch(basePointer, &emptyBase, sizeof(emptyBase)) || !GuestCopyOut_nid_no_patch(sizePointer, &emptySize, sizeof(emptySize))) NotImplemented_nid_no_patch(__func__);
+    const std::lock_guard lock(g_expandedCommandBuffersMutex);
+    const auto expanded = g_expandedCommandBuffers.find(buffer);
+    if (expanded != g_expandedCommandBuffers.end()) {
+        memory = expanded->second.originalBase;
+        GuestHeap::GuestHeapFree_nid_postfix(expanded->second.allocation);
+        g_expandedCommandBuffers.erase(expanded);
+    }
     return memory;
 }
 
