@@ -10,23 +10,21 @@
 extern "C" {
 
 int APS5_VABI sceAgcQueueEndOfPipeActionPatchAddress(std::uint32_t* cmd, const volatile Label* address) {
-    Agc::Command::CheckAddress(reinterpret_cast<std::uintptr_t>(cmd), 4, __func__);
+    const auto packet = reinterpret_cast<std::uintptr_t>(cmd);
+    std::uint8_t opcode = 0;
+    if (!GuestCopyIn_nid_no_patch(&opcode, reinterpret_cast<const void*>(packet + 1), sizeof(opcode))) NotImplemented_nid_no_patch(__func__);
+    if (opcode != 0x49u) return static_cast<int>(0x8a6c000cu);
+    std::uint64_t control = 0;
+    if (!GuestCopyIn_nid_no_patch(&control, reinterpret_cast<const void*>(packet + 4), sizeof(control))) NotImplemented_nid_no_patch(__func__);
+    if (((control >> 56u) & 7u) == 4u) return 0;
+    std::uint32_t lowAddress = 0;
+    auto* lowAddressField = reinterpret_cast<void*>(packet + 12);
+    if (!GuestCopyIn_nid_no_patch(&lowAddress, lowAddressField, sizeof(lowAddress))) NotImplemented_nid_no_patch(__func__);
     const auto guestAddress = reinterpret_cast<std::uintptr_t>(address);
-    const auto opcode = (cmd[0] >> 8u) & 0xffu;
-    if (opcode == 0x49u) {
-        Agc::Command::ValidatePacket(cmd, opcode, 8, __func__);
-        const auto dataSelect = cmd[2] >> 29u;
-        Agc::Command::CheckAddress(guestAddress, dataSelect == 2 || dataSelect == 3 ? 8 : 4, __func__);
-        cmd[3] = static_cast<std::uint32_t>(guestAddress);
-        cmd[4] = static_cast<std::uint32_t>(guestAddress >> 32u);
-    } else {
-        Agc::Command::ValidatePacket(cmd, 0x47u, 6, __func__);
-        const auto dataSelect = cmd[3] >> 29u;
-        Agc::Command::CheckAddress(guestAddress, dataSelect == 2 || dataSelect == 3 ? 8 : 4, __func__);
-        Agc::Command::CheckBits(guestAddress, 0xffffffffffffull, __func__);
-        cmd[2] = static_cast<std::uint32_t>(guestAddress);
-        cmd[3] = (cmd[3] & 0xffff0000u) | static_cast<std::uint32_t>(guestAddress >> 32u);
-    }
+    lowAddress = (lowAddress & 3u) | (static_cast<std::uint32_t>(guestAddress) & ~3u);
+    const auto highAddress = static_cast<std::uint32_t>(guestAddress >> 32u);
+    if (!GuestCopyOut_nid_no_patch(lowAddressField, &lowAddress, sizeof(lowAddress))) NotImplemented_nid_no_patch(__func__);
+    if (!GuestCopyOut_nid_no_patch(reinterpret_cast<void*>(packet + 16), &highAddress, sizeof(highAddress))) NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 

@@ -289,25 +289,49 @@ void testMarkerSpans() {
 
 void testEndOfPipeAddressPatch() {
     const auto label = [](std::uintptr_t address) { return reinterpret_cast<const volatile Label*>(address); };
-    std::array<std::uint32_t, 8> release{};
-    release[0] = Agc::Command::Header(0x49u, 8);
-    release[2] = 1u << 29u;
-    check(sceAgcQueueEndOfPipeActionPatchAddress(release.data(), label(0x123456789abcu)) == 0 && release[3] == 0x56789abcu && release[4] == 0x1234u, "RELEASE_MEM address patch mismatch");
-    release[2] = 2u << 29u;
-    const auto before = release;
-    expectFailure([&] { sceAgcQueueEndOfPipeActionPatchAddress(release.data(), label(0x123456789ab4u)); });
-    check(release == before, "a 64-bit RELEASE_MEM accepted a label that is not 8-byte aligned");
-    check(sceAgcQueueEndOfPipeActionPatchAddress(release.data(), label(0x123456789ab8u)) == 0 && release[3] == 0x56789ab8u, "64-bit RELEASE_MEM address patch mismatch");
-    std::array<std::uint32_t, 6> event{};
-    event[0] = Agc::Command::Header(0x47u, 6);
-    event[3] = (1u << 29u) | 0x00ab0000u;
-    check(sceAgcQueueEndOfPipeActionPatchAddress(event.data(), label(0x123456789abcu)) == 0 && event[2] == 0x56789abcu && event[3] == ((1u << 29u) | 0x00ab1234u), "EVENT_WRITE_EOP address patch did not keep the control bits");
-    const auto eventBefore = event;
-    expectFailure([&] { sceAgcQueueEndOfPipeActionPatchAddress(event.data(), label(0x1000000000000u)); });
-    check(event == eventBefore, "an EVENT_WRITE_EOP accepted an address above 48 bits");
-    event[0] = Agc::Command::Header(0x47u, 5);
-    expectFailure([&] { sceAgcQueueEndOfPipeActionPatchAddress(event.data(), label(0x1000u)); });
-    expectFailure([&] { sceAgcQueueEndOfPipeActionPatchAddress(nullptr, label(0x1000u)); });
+    std::array<std::uint32_t, 8> release{Agc::Command::Header(0x49u, 8), 0x12345678u, 1u << 29u, 3u, 0x87654321u, 5u, 6u, 7u};
+    auto expected = release;
+    expected[3] = 0x56789abfu;
+    expected[4] = 0x1234u;
+    check(sceAgcQueueEndOfPipeActionPatchAddress(release.data(), label(0x123456789abcu)) == 0 && release == expected,
+          "RELEASE_MEM address patch did not preserve the low two address bits");
+
+    const std::array<std::uintptr_t, 8> addresses{0, 1, 3, 0x123456789abcu, ~std::uintptr_t{0}, 0xfedcba9876543211u, 0x1000000000000u, 0x123456789ab4u};
+    for (std::uint32_t interrupt = 0; interrupt < addresses.size(); ++interrupt) {
+        release = {0xa50049ffu | (interrupt << 16u), 0x13579bdfu, 0x18abcdefu | (interrupt << 24u) | ((7u - interrupt) << 29u),
+                   0x89abcdefu ^ interrupt, 0x76543210u, 0x11223344u, 0x55667788u, 0x99aabbccu};
+        expected = release;
+        if (interrupt != 4u) {
+            expected[3] = (expected[3] & 3u) | (static_cast<std::uint32_t>(addresses[interrupt]) & ~3u);
+            expected[4] = static_cast<std::uint32_t>(addresses[interrupt] >> 32u);
+        }
+        check(sceAgcQueueEndOfPipeActionPatchAddress(release.data(), label(addresses[interrupt])) == 0 && release == expected,
+              "RELEASE_MEM address patch changed unrelated bits or mishandled interrupt selection");
+    }
+
+    for (const auto header : {Agc::Command::Header(0x47u, 6), Agc::Command::Header(0x47u, 5), 0u, 0xffffffffu}) {
+        release[0] = header;
+        expected = release;
+        check(sceAgcQueueEndOfPipeActionPatchAddress(release.data(), label(0)) == static_cast<int>(0x8a6c000cu),
+              "non-RELEASE_MEM opcode did not return the packet error");
+        check(release == expected, "rejected end-of-pipe packet was modified");
+    }
+
+    alignas(8) std::array<unsigned char, 48> storage{};
+    storage.fill(0xa5);
+    release = {0x49u << 8u, 0x01234567u, 2u << 29u, 0x89abcdefu, 0x76543210u, 5u, 6u, 7u};
+    std::memcpy(storage.data() + 1, release.data(), sizeof(release));
+    auto expectedStorage = storage;
+    release[3] = 0x76543213u;
+    release[4] = 0xfedcba98u;
+    std::memcpy(expectedStorage.data() + 1, release.data(), sizeof(release));
+    check(sceAgcQueueEndOfPipeActionPatchAddress(reinterpret_cast<std::uint32_t*>(storage.data() + 1), label(0xfedcba9876543211u)) == 0,
+          "unaligned RELEASE_MEM packet was rejected");
+    check(storage == expectedStorage, "unaligned RELEASE_MEM patch changed surrounding bytes");
+
+    for (const auto invalid : {std::uintptr_t{0}, std::uintptr_t{1}, ~std::uintptr_t{0}}) {
+        expectFailure([&] { sceAgcQueueEndOfPipeActionPatchAddress(reinterpret_cast<std::uint32_t*>(invalid), label(0x1000u)); });
+    }
 }
 
 void testWorkloads() {
