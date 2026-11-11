@@ -391,11 +391,10 @@ std::uint64_t APS5_VABI sceAmprMeasureCommandSizeWaitOnCounter() { return sizeof
 std::uint64_t APS5_VABI sceAmprMeasureCommandSizeWriteKernelEventQueueOnCompletion() { return sizeof(Apr::WriteKernelEventQueueCommand); }
 
 int APS5_VABI sceAmprAprCommandBufferConstructor(Apr::CommandBufferObject* buffer, uint64_t* gatherState, uint64_t* scatterState) {
-    if (!buffer || !gatherState || !scatterState) return SCE_KERNEL_ERROR_EINVAL;
-    ReleaseExpandedCommandBuffer(buffer);
-    buffer->type = Apr::BufferType::Apr;
+    (void)buffer;
     const std::uint64_t zero = 0;
-    if (!GuestCopyOut_nid_no_patch(gatherState, &zero, sizeof(zero)) || !GuestCopyOut_nid_no_patch(scatterState, &zero, sizeof(zero))) return SCE_KERNEL_ERROR_EFAULT;
+    if (gatherState && !GuestCopyOut_nid_no_patch(gatherState, &zero, sizeof(zero))) NotImplemented_nid_no_patch(__func__);
+    if (scatterState && !GuestCopyOut_nid_no_patch(scatterState, &zero, sizeof(zero))) NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 

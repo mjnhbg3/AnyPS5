@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -90,6 +91,76 @@ void RequireRecorded(const Recorder& recorder, std::uint32_t offset, std::uint32
     Require(std::memcmp(recorder.memory.data() + offset + sizeof(Apr::MarkerCommand), text.c_str(), text.size() + 1) == 0);
 }
 
+void TestAprConstructor() {
+    std::array<std::uint8_t, 32> memory{};
+    Apr::CommandBufferObject buffer{Apr::BufferType::Generic, 0xa503, 12, 5, static_cast<std::uint32_t>(memory.size()), memory.data()};
+    const auto original = buffer;
+    std::uint64_t gather = 0x123456789abcdef0ull;
+    std::uint64_t scatter = 0xfedcba9876543210ull;
+    Require(sceAmprAprCommandBufferConstructor(&buffer, &gather, &scatter) == 0);
+    Require(std::memcmp(&buffer, &original, sizeof(buffer)) == 0);
+    Require(gather == 0 && scatter == 0);
+
+    for (auto* object : {&buffer, static_cast<Apr::CommandBufferObject*>(nullptr),
+             reinterpret_cast<Apr::CommandBufferObject*>(1), reinterpret_cast<Apr::CommandBufferObject*>(std::numeric_limits<std::uintptr_t>::max())}) {
+        for (unsigned mask = 0; mask < 4; ++mask) {
+            gather = 0x123456789abcdef0ull;
+            scatter = 0xfedcba9876543210ull;
+            Require(sceAmprAprCommandBufferConstructor(object, mask & 1u ? &gather : nullptr, mask & 2u ? &scatter : nullptr) == 0);
+            Require(gather == (mask & 1u ? 0 : 0x123456789abcdef0ull));
+            Require(scatter == (mask & 2u ? 0 : 0xfedcba9876543210ull));
+            Require(std::memcmp(&buffer, &original, sizeof(buffer)) == 0);
+        }
+    }
+
+    constexpr std::array<std::array<std::size_t, 2>, 4> stateOffsets{{{8, 8}, {9, 13}, {13, 9}, {8, 16}}};
+    for (const auto offsets : stateOffsets) {
+        alignas(std::uint64_t) std::array<std::uint8_t, 32> states;
+        states.fill(0xa5);
+        auto expected = states;
+        for (const auto offset : offsets) std::memset(expected.data() + offset, 0, sizeof(std::uint64_t));
+        Require(sceAmprAprCommandBufferConstructor(&buffer, reinterpret_cast<std::uint64_t*>(states.data() + offsets[0]),
+            reinterpret_cast<std::uint64_t*>(states.data() + offsets[1])) == 0);
+        Require(states == expected);
+        Require(std::memcmp(&buffer, &original, sizeof(buffer)) == 0);
+    }
+
+    struct Guarded {
+        std::uint64_t before;
+        Apr::CommandBufferObject buffer;
+        std::uint64_t after;
+    } guarded{0x1122334455667788ull, original, 0x8877665544332211ull};
+    auto expected = guarded;
+    auto* objectBytes = reinterpret_cast<std::uint8_t*>(&guarded.buffer);
+    auto* expectedBytes = reinterpret_cast<std::uint8_t*>(&expected.buffer);
+    std::memset(expectedBytes + offsetof(Apr::CommandBufferObject, offset), 0, sizeof(std::uint64_t));
+    std::memset(expectedBytes + offsetof(Apr::CommandBufferObject, base), 0, sizeof(std::uint64_t));
+    Require(sceAmprAprCommandBufferConstructor(&guarded.buffer,
+        reinterpret_cast<std::uint64_t*>(objectBytes + offsetof(Apr::CommandBufferObject, offset)),
+        reinterpret_cast<std::uint64_t*>(objectBytes + offsetof(Apr::CommandBufferObject, base))) == 0);
+    Require(std::memcmp(&guarded, &expected, sizeof(guarded)) == 0);
+
+    const auto requireFailure = [&](std::uint64_t* first, std::uint64_t* second) {
+        bool threw = false;
+        try {
+            sceAmprAprCommandBufferConstructor(&buffer, first, second);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        Require(threw);
+        Require(std::memcmp(&buffer, &original, sizeof(buffer)) == 0);
+    };
+    for (const auto address : {std::uintptr_t{0x10}, std::numeric_limits<std::uintptr_t>::max()}) {
+        auto* invalid = reinterpret_cast<std::uint64_t*>(address);
+        scatter = 0xfedcba9876543210ull;
+        requireFailure(invalid, &scatter);
+        Require(scatter == 0xfedcba9876543210ull);
+        gather = 0x123456789abcdef0ull;
+        requireFailure(&gather, invalid);
+        Require(gather == 0);
+    }
+}
+
 void TestRecording(const std::string& text) {
     Recorder recorder;
     const char* marker = text.c_str();
@@ -144,12 +215,10 @@ void TestRejectedArguments() {
     std::uint64_t scatterState = 0;
     std::array<std::uint8_t, 64> memory{};
     Require(sceAmprCommandBufferConstructor(nullptr) == invalidArgument);
-    Require(sceAmprAprCommandBufferConstructor(nullptr, &gatherState, &scatterState) == invalidArgument);
-    Require(sceAmprAprCommandBufferConstructor(&recorder.buffer, nullptr, &scatterState) == invalidArgument);
-    Require(sceAmprAprCommandBufferConstructor(&recorder.buffer, &gatherState, nullptr) == invalidArgument);
+    Require(sceAmprAprCommandBufferConstructor(nullptr, &gatherState, &scatterState) == 0);
+    Require(sceAmprAprCommandBufferConstructor(&recorder.buffer, nullptr, &scatterState) == 0);
+    Require(sceAmprAprCommandBufferConstructor(&recorder.buffer, &gatherState, nullptr) == 0);
     Require(sceAmprCommandBufferConstructor(reinterpret_cast<Apr::CommandBufferObject*>(0x10)) == invalidPointer);
-    Require(sceAmprAprCommandBufferConstructor(&recorder.buffer, reinterpret_cast<std::uint64_t*>(0x10), &scatterState) == invalidPointer);
-    Require(sceAmprAprCommandBufferConstructor(&recorder.buffer, &gatherState, reinterpret_cast<std::uint64_t*>(0x10)) == invalidPointer);
     Require(sceAmprCommandBufferReset(nullptr) == invalidArgument);
     Require(sceAmprCommandBufferSetBuffer(nullptr, memory.data(), memory.size()) == invalidArgument);
     alignas(8) std::uint64_t target = 0;
@@ -1646,7 +1715,7 @@ void TestWriteAddressCommand() {
     Require(command.address == reinterpret_cast<std::uint64_t>(&target) && command.value == 0x1122334455667788ull && command.flags == 0);
     Require(sceAmprMeasureCommandSizeWriteAddress_04_00() == sizeof(Apr::WriteAddressCommand));
     Require(sceAmprMeasureCommandSizeWriteKernelEventQueue_04_00(0, 0, 0) == sizeof(Apr::WriteKernelEventQueueCommand));
-    Require(sceAmprCommandBufferGetType(&recorder.buffer) == static_cast<std::uint32_t>(Apr::BufferType::Apr));
+    Require(sceAmprCommandBufferGetType(&recorder.buffer) == static_cast<std::uint32_t>(Apr::BufferType::Generic));
     Require(sceKernelAprSubmitCommandBuffer(&recorder.buffer, 0) == 0);
     Require(target == 0x1122334455667788ull);
     Apr::CommandBufferObject generic{};
@@ -1791,6 +1860,19 @@ void TestExpandedBufferLifecycle() {
     Require(buffer.base != memory1.data());
     Require(buffer.offset == 3 * sizeof(Apr::WriteAddressCommand));
 
+    const auto expanded = buffer;
+    std::array<std::uint8_t, 3 * sizeof(Apr::WriteAddressCommand)> commands;
+    std::memcpy(commands.data(), buffer.base, commands.size());
+    std::uint64_t constructorGather = 1;
+    std::uint64_t constructorScatter = 2;
+    Require(sceAmprAprCommandBufferConstructor(&buffer, &constructorGather, &constructorScatter) == 0);
+    Require(std::memcmp(&buffer, &expanded, sizeof(buffer)) == 0);
+    Require(std::memcmp(buffer.base, commands.data(), commands.size()) == 0);
+    Require(constructorGather == 0 && constructorScatter == 0);
+    Require(sceAmprCommandBufferWriteAddressOnCompletion(&buffer, &done, 0x1234) == 0);
+    Require(sceKernelAprSubmitCommandBuffer(&buffer, 0) == 0);
+    Require(done == 0x1234);
+
     Require(sceAmprCommandBufferReset(&buffer) == 0);
     Require(buffer.offset == 0 && buffer.numCommands == 0);
     Require(buffer.base != memory1.data());
@@ -1908,6 +1990,7 @@ void TestConstructNopPayloadIntoBuffer() {
 }
 
 int main() {
+    TestAprConstructor();
     TestRecording("frame");
     TestRecording("");
     TestRecording("1234567");
