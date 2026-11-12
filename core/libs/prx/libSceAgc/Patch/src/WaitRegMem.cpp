@@ -45,16 +45,43 @@ int SetWriteDataCachePolicy(std::uint32_t* cmd, std::uint8_t cachePolicy, const 
 extern "C" {
 
 int APS5_VABI sceAgcWaitRegMemPatchAddress(std::uint32_t* cmd, const volatile void* address) {
-    auto* wait = Agc::Command::ValidateWait(cmd, __func__);
+    const auto packetAddress = reinterpret_cast<std::uintptr_t>(cmd);
+    std::uint32_t header;
+    if (!GuestCopyIn_nid_no_patch(&header, reinterpret_cast<const void*>(packetAddress), sizeof(header))) {
+        NotImplemented_nid_no_patch(__func__);
+    }
+    if ((header & 0x3fffff00u) != 0x00027900u) return static_cast<int>(0x8a6c000cu);
     const auto guestAddress = reinterpret_cast<std::uintptr_t>(address);
-    const auto is32Bit = ((wait[0] >> 8u) & 0xffu) == 0x3cu;
-    const auto lowMask = is32Bit ? 3u : 7u;
-    if (guestAddress != 0) Agc::Command::CheckAddress(guestAddress, is32Bit ? 4 : 8, __func__);
-    Agc::Command::CheckBits(guestAddress, 0xffffffffffffull, __func__);
-    cmd[2] =(cmd[2] & 0xffff0000u) | (static_cast<std::uint32_t>(guestAddress >> 32u) & 0xffffu);
-    cmd[3] = static_cast<std::uint32_t>(guestAddress);
-    wait[2] = (static_cast<std::uint32_t>(guestAddress) & ~lowMask) | (wait[2] & lowMask);
-    wait[3] = (static_cast<std::uint32_t>(guestAddress >> 32u) & 0x3ffffu) | (wait[3] & 0xfffc0000u);
+    const auto prefixHigh = static_cast<std::uint16_t>(guestAddress >> 32u);
+    if (!GuestCopyOut_nid_no_patch(reinterpret_cast<void*>(packetAddress + 8), &prefixHigh, sizeof(prefixHigh))) {
+        NotImplemented_nid_no_patch(__func__);
+    }
+    const auto lowAddress = static_cast<std::uint32_t>(guestAddress);
+    if (!GuestCopyOut_nid_no_patch(reinterpret_cast<void*>(packetAddress + 12), &lowAddress, sizeof(lowAddress))) {
+        NotImplemented_nid_no_patch(__func__);
+    }
+    std::uint8_t opcode;
+    if (!GuestCopyIn_nid_no_patch(&opcode, reinterpret_cast<const void*>(packetAddress + 17), sizeof(opcode))) {
+        NotImplemented_nid_no_patch(__func__);
+    }
+    if (opcode != 0x3cu && opcode != 0x93u) return static_cast<int>(0x8a6c000cu);
+    std::uint32_t low;
+    if (!GuestCopyIn_nid_no_patch(&low, reinterpret_cast<const void*>(packetAddress + 24), sizeof(low))) {
+        NotImplemented_nid_no_patch(__func__);
+    }
+    const auto lowMask = opcode == 0x3cu ? 3u : 7u;
+    low = (lowAddress & ~lowMask) | (low & lowMask);
+    if (!GuestCopyOut_nid_no_patch(reinterpret_cast<void*>(packetAddress + 24), &low, sizeof(low))) {
+        NotImplemented_nid_no_patch(__func__);
+    }
+    std::uint32_t high;
+    if (!GuestCopyIn_nid_no_patch(&high, reinterpret_cast<const void*>(packetAddress + 28), sizeof(high))) {
+        NotImplemented_nid_no_patch(__func__);
+    }
+    high = (static_cast<std::uint32_t>(guestAddress >> 32u) & 0x3ffffu) | (high & 0xfffc0000u);
+    if (!GuestCopyOut_nid_no_patch(reinterpret_cast<void*>(packetAddress + 28), &high, sizeof(high))) {
+        NotImplemented_nid_no_patch(__func__);
+    }
     return 0;
 }
 

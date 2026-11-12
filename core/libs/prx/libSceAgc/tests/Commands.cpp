@@ -721,6 +721,55 @@ void testPacketPayloadAddress() {
     check(payload == packet + 2, "invalid packet changed output address");
 }
 
+void testWaitAddressPatch() {
+    const std::uintptr_t address = 0xfedcba9876543211u;
+    for (const auto opcode : {0x3cu, 0x93u}) {
+        std::array<std::uint32_t, 10> words{0x000279ffu, 0x87654321u, 0x13572468u, 0xa5a5a5a5u, 0xa5f0007du | (opcode << 8u),
+                                          0x98765432u, 0x12345675u, 0xa5fc9876u, 0xabcdef01u, 0x23456789u};
+        auto expected = words;
+        expected[2] = 0x1357ba98u;
+        expected[3] = 0x76543211u;
+        expected[6] = opcode == 0x3cu ? 0x76543211u : 0x76543215u;
+        expected[7] = 0xa5fcba98u;
+        check(sceAgcWaitRegMemPatchAddress(words.data(), reinterpret_cast<const volatile void*>(address)) == 0 && words == expected,
+              "wait address patch rejected ignored fields or changed control bits");
+        expected[2] = 0x13570000u;
+        expected[3] = 0;
+        expected[6] &= opcode == 0x3cu ? 3u : 7u;
+        expected[7] = 0xa5fc0000u;
+        check(sceAgcWaitRegMemPatchAddress(words.data(), nullptr) == 0 && words == expected, "null wait address did not preserve control bits");
+    }
+
+    std::array<std::uint32_t, 8> words{0xc0027904u, 0x87654321u, 0x13572468u, 0xa5a5a5a5u, 0xdead4700u, 0x98765432u, 0x12345675u, 0xa5fc9876u};
+    auto expected = words;
+    expected[2] = 0x1357ba98u;
+    expected[3] = 0x76543211u;
+    check(sceAgcWaitRegMemPatchAddress(words.data(), reinterpret_cast<const volatile void*>(address)) == static_cast<int>(0x8a6c000cu),
+          "invalid trailing wait opcode did not return the packet error");
+    check(words == expected, "invalid trailing wait opcode did not retain only the prefix address writes");
+    for (const auto header : {0xc0017904u, 0xc0027804u, 0xffff1000u}) {
+        words[0] = header;
+        expected = words;
+        check(sceAgcWaitRegMemPatchAddress(words.data(), nullptr) == static_cast<int>(0x8a6c000cu) && words == expected,
+              "invalid wait prefix did not return the packet error unchanged");
+    }
+
+    alignas(8) std::array<unsigned char, 48> bytes{};
+    bytes.fill(0xa5);
+    words = {0xc0027904u, 0x342u, 0xc8020000u, 0x12345678u, 0x00009300u, 0x98765432u, 0x12345675u, 0xa5fc9876u};
+    std::memcpy(bytes.data() + 1, words.data(), sizeof(words));
+    auto expectedBytes = bytes;
+    words[3] = 1;
+    words[6] = 5;
+    words[7] = 0xa5fc0000u;
+    std::memcpy(expectedBytes.data() + 1, words.data(), sizeof(words));
+    check(sceAgcWaitRegMemPatchAddress(reinterpret_cast<std::uint32_t*>(bytes.data() + 1), reinterpret_cast<const volatile void*>(std::uintptr_t{1})) == 0 && bytes == expectedBytes,
+          "unaligned wait address patch changed surrounding bytes");
+    for (const auto invalid : {std::uintptr_t{0}, std::uintptr_t{1}, ~std::uintptr_t{0}}) {
+        expectFailure([&] { sceAgcWaitRegMemPatchAddress(reinterpret_cast<std::uint32_t*>(invalid), nullptr); });
+    }
+}
+
 void testMemory() {
     Storage storage;
     Agc::Command::WriteDma(&storage.buffer, false, 1, 0, 0, 0x2000, 2, 0, 0x12345678, 16, 0, 1, 1, __func__);
@@ -758,15 +807,15 @@ void testMemory() {
         }
         check(storage.words == beforeComparison, "a rejected wait comparison patch modified packet memory");
     }
-    const auto beforeAddress = storage.words;
-    expectFailure([&] { sceAgcWaitRegMemPatchAddress(packet, reinterpret_cast<const volatile void*>(std::uintptr_t{0x123456789ab4u})); });
-    expectFailure([&] { sceAgcWaitRegMemPatchAddress(truncated, reinterpret_cast<const volatile void*>(std::uintptr_t{0x123456789ab2u})); });
-    check(storage.words == beforeAddress, "a misaligned wait address patch modified packet memory");
+    check(sceAgcWaitRegMemPatchAddress(packet, reinterpret_cast<const volatile void*>(std::uintptr_t{0x123456789ab4u})) == 0 && packet[3] == 0x56789ab4u && packet[6] == 0x56789ab7u,
+          "64-bit wait rejected an unaligned address or lost its control bits");
+    check(sceAgcWaitRegMemPatchAddress(truncated, reinterpret_cast<const volatile void*>(std::uintptr_t{0x123456789ab2u})) == 0 && truncated[3] == 0x56789ab2u && truncated[6] == 0x56789ab3u,
+          "32-bit wait rejected an unaligned address or lost its control bits");
     check(sceAgcWaitRegMemPatchAddress(truncated, reinterpret_cast<const volatile void*>(std::uintptr_t{0x123456789ab4u})) == 0 && truncated[3] == 0x56789ab4u, "32-bit wait rejected a 4-byte aligned address");
-    const auto beforeWideAddress = storage.words;
-    expectFailure([&] { sceAgcWaitRegMemPatchAddress(packet, reinterpret_cast<const volatile void*>(std::uintptr_t{0x1000000000008u})); });
-    expectFailure([&] { sceAgcWaitRegMemPatchAddress(truncated, reinterpret_cast<const volatile void*>(std::uintptr_t{0x1000000000004u})); });
-    check(storage.words == beforeWideAddress, "a wait address above 48 bits modified packet memory");
+    check(sceAgcWaitRegMemPatchAddress(packet, reinterpret_cast<const volatile void*>(std::uintptr_t{0x1000000000008u})) == 0 && (packet[2] & 0xffffu) == 0 && packet[3] == 8 && packet[6] == 15 && packet[7] == 0xa5fd0000u,
+          "64-bit wait did not patch an address above 48 bits");
+    check(sceAgcWaitRegMemPatchAddress(truncated, reinterpret_cast<const volatile void*>(std::uintptr_t{0x1000000000004u})) == 0 && (truncated[2] & 0xffffu) == 0 && truncated[3] == 4 && truncated[6] == 7 && truncated[7] == 0xa5fd0000u,
+          "32-bit wait did not patch an address above 48 bits");
     const auto beforeMask = storage.words;
     expectFailure([&] { sceAgcWaitRegMemPatchMask(packet + 4, 1); });
     check(storage.words == beforeMask, "invalid mask patch modified packet memory");
@@ -1261,6 +1310,7 @@ int main(int argc, char** argv) {
         testRegisterRange();
         testPacketPayloadAddress();
         testMemory();
+        testWaitAddressPatch();
         testEndOfPipePatches();
         testAtomicGds();
         testDebugRaiseException();
