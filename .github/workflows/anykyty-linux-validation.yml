@@ -1,0 +1,127 @@
+name: AnyKyty Linux memory test acceptance
+
+on:
+  push:
+    branches: [codex/kyty-linux-validation-20261117]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'mjnhbg3/AnyPS5'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      BASE: 76574d3611069b06ab1339bb04e3b79e4db75667
+      TEST_DIR: core/libs/prx/libSceAgcDriver
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Set the evidence directory
+        shell: bash
+        run: echo "EVIDENCE=$RUNNER_TEMP/anykyty-linux-evidence" >> "$GITHUB_ENV"
+      - name: Install the pinned CI toolchain
+        shell: bash
+        run: |
+          test "$(uname -m)" = x86_64
+          sudo curl -fsSL --connect-timeout 15 --max-time 60 --retry 2 -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+          echo "deb https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -q
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq --no-install-recommends \
+            gcc-14 g++-14 clang-21 lld-21 llvm-21 cmake ninja-build pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxkbcommon-dev libwayland-dev libegl-dev libdecor-0-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxinerama-dev libxss-dev libxxf86vm-dev libudev-dev libdrm-dev libgbm-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libvulkan1 libvulkan-dev mesa-vulkan-drivers
+          echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
+      - name: Check the pinned test-only candidate
+        shell: bash
+        run: |
+          candidate="$(git rev-parse HEAD^)"
+          test "$(git rev-parse "$candidate^")" = "$BASE"
+          test "$(git diff --name-only "$candidate" HEAD)" = ".github/workflows/anykyty-linux-validation.yml"
+          mkdir -p "$EVIDENCE"
+          printf 'base=%s\ncandidate=%s\nworkflow=%s\n' "$BASE" "$candidate" "$(git rev-parse HEAD)" | tee "$EVIDENCE/refs.txt"
+          printf '%s\n' "$TEST_DIR/CMakeLists.txt" "$TEST_DIR/KytyShim/src/EntryTests.cpp" "$TEST_DIR/KytyShim/tests/CMakeLists.txt" > "$EVIDENCE/paths.txt"
+          git diff --name-only "$BASE" "$candidate" | diff - "$EVIDENCE/paths.txt"
+          git submodule update --init --recursive --depth 1 --jobs 8
+      - name: Compare baseline and candidate CTest registrations
+        shell: bash
+        run: |
+          g++-14 --version
+          clang++ --version
+          ld.lld --version
+          candidate="$(git rev-parse HEAD^)"
+          mapfile -t paths < "$EVIDENCE/paths.txt"
+          trap 'git restore --source="$candidate" --worktree -- "${paths[@]}"' EXIT
+          for side in baseline candidate; do
+            if [ "$side" = baseline ]; then ref="$BASE"; else ref="$candidate"; fi
+            git restore --source="$ref" --worktree -- "${paths[@]}"
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+              -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+              -DANYPS5_GPU_BACKEND=kyty -DANYPS5_KYTY_THIN_LTO=OFF -DANYPS5_KYTY_JOBS="$(nproc)"
+            ctest --test-dir build --show-only=json-v1 > "$EVIDENCE/$side-ctest.json"
+            ninja -C build -t targets all > "$EVIDENCE/$side-targets.txt"
+            find build -name CTestTestfile.cmake -print0 | sort -z |
+              xargs -r -0 grep -H -E '^(add_test|set_tests_properties)\(' | sed -E 's/ _BACKTRACE_TRIPLES ".*"\)$/) /' > "$EVIDENCE/$side-registrations.txt"
+          done
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          evidence = Path(os.environ["EVIDENCE"])
+          expected_targets = {
+              "kyty_shim_cache_topology_tests", "kyty_shim_entry_tests", "kyty_shim_events_tests",
+              "kyty_shim_memory_tests", "kyty_shim_native_rt_tests", "kyty_shim_system_content_tests",
+          }
+          expected_tests = {name.removesuffix("_tests") for name in expected_targets}
+          expected_tests.update({"kyty_shim_memory_plain_reads", "kyty_shim_memory_sparse_reads_switch"})
+
+          def inventory(side):
+              payload = json.loads((evidence / f"{side}-ctest.json").read_text())
+              return sorted(
+                  ({key: value for key, value in test.items() if key != "backtrace"} for test in payload["tests"]),
+                  key=lambda test: test["name"],
+              )
+
+          def targets(side):
+              lines = (evidence / f"{side}-targets.txt").read_text().splitlines()
+              return {match.group(1) for line in lines if (match := re.match(r"^(kyty_shim_[A-Za-z0-9_]+_tests):", line))}
+
+          baseline, candidate = inventory("baseline"), inventory("candidate")
+          assert baseline == candidate, "Full normalized CTest inventory differs"
+          assert (evidence / "baseline-registrations.txt").read_bytes() == (evidence / "candidate-registrations.txt").read_bytes(), "Generated test commands or properties differ"
+          tests = sorted(test["name"] for test in candidate if test["name"].startswith("kyty_shim_"))
+          assert tests == sorted(expected_tests), tests
+          assert targets("baseline") == targets("candidate") == expected_targets
+          (evidence / "build-targets.txt").write_text("\n".join(sorted(expected_targets)) + "\n")
+          report = {"registered_cases": len(candidate), "cases": tests, "build_targets": sorted(expected_targets)}
+          (evidence / "registration-parity.json").write_text(json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report, indent=2))
+          PY
+      - name: Build and run the eight Kyty shim tests
+        shell: bash
+        run: |
+          candidate="$(git rev-parse HEAD^)"
+          mapfile -t paths < "$EVIDENCE/paths.txt"
+          mapfile -t targets < "$EVIDENCE/build-targets.txt"
+          trap 'git restore --source="$candidate" --worktree -- "${paths[@]}"' EXIT
+          sudo sysctl -w vm.unprivileged_userfaultfd=1 vm.max_map_count=2147483642 kernel.core_pattern=core
+          ulimit -c 0
+          for side in baseline candidate; do
+            if [ "$side" = baseline ]; then ref="$BASE"; else ref="$candidate"; fi
+            git restore --source="$ref" --worktree -- "${paths[@]}"
+            cmake --build build --target "${targets[@]}" --parallel "$(nproc)"
+            ctest --test-dir build -R '^kyty_shim_' --output-on-failure --timeout 300 --no-tests=error \
+              --output-log "$EVIDENCE/$side-ctest.log" --output-junit "$EVIDENCE/$side-ctest.xml"
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: anykyty-linux-evidence
+          path: ${{ env.EVIDENCE }}
+          retention-days: 7
