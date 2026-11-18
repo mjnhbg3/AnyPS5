@@ -1073,11 +1073,14 @@ static void EdgeTriggeredSocketRead() {
     Require(Poll(kq, events, 4) == 0);
 
     const KernelTimespec quiet{0, 150000000};
-    const auto idleStart = std::chrono::steady_clock::now();
+    constexpr int idleWaitCount = 3;
     const double idleCpu = ProcessCpuSeconds();
-    Require(kevent_nid_postfix(kq, nullptr, 0, events, 4, &quiet) == 0);
-    Require(ProcessCpuSeconds() - idleCpu < 0.05);
-    Require(std::chrono::steady_clock::now() - idleStart >= std::chrono::milliseconds(140));
+    for (int wait = 0; wait < idleWaitCount; ++wait) {
+        const auto idleStart = std::chrono::steady_clock::now();
+        Require(kevent_nid_postfix(kq, nullptr, 0, events, 4, &quiet) == 0);
+        Require(std::chrono::steady_clock::now() - idleStart >= std::chrono::milliseconds(140));
+    }
+    Require(ProcessCpuSeconds() - idleCpu < 0.05 * idleWaitCount);
 
     Require(send_nid_postfix(pair[1], "d", 1, 0) == 1);
     Require(Poll(kq, events, 4) == 1 && events[0].data == 4);
