@@ -1,0 +1,70 @@
+name: Linux RT survey qualification artifacts
+
+on:
+  push:
+    branches: [codex/kyty-rt-linux-qualification]
+
+permissions:
+  contents: read
+
+jobs:
+  probes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 4
+          submodules: recursive
+          persist-credentials: false
+      - name: Install the AnyKyty Linux toolchain
+        run: |
+          sudo curl -fsSL --retry 3 -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+          echo 'deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+            gcc-14 g++-14 ninja-build pkg-config ccache clang-21 lld-21 llvm-21 \
+            libx11-dev libxext-dev libxrandr-dev libxkbcommon-dev libwayland-dev libegl-dev libdecor-0-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxinerama-dev libxss-dev libxxf86vm-dev libudev-dev libdrm-dev libgbm-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libvulkan1 libvulkan-dev mesa-vulkan-drivers
+          echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
+      - uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: linux-rt-probes
+          max-size: 3G
+      - name: Build and test the pinned probes
+        run: |
+          set -eu -o pipefail
+          baseline=96dcea2c9ddb723bbf4f7719d480dacd08205d13
+          candidate=25e147365d2c7afa4fbc3794296996dcc7586aa8
+          for arm in baseline candidate; do
+            sha="$baseline"
+            if [ "$arm" = candidate ]; then sha="$candidate"; fi
+            git switch --detach "$sha"
+            test "$(git rev-parse HEAD)" = "$sha"
+            echo "$arm $sha"
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+              -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DANYPS5_GPU_BACKEND=kyty -DANYPS5_KYTY_JOBS="$(nproc)"
+            cmake --build build --target kyty_rt_probe kyty_shim_rt_probe_cache_tests --parallel "$(nproc)"
+            ctest --test-dir build -R '^kyty_shim_rt_probe_(cache|export)$' --output-on-failure --no-tests=error
+            python3 -B tools/tests/test_rt_survey.py
+            probe=build/tests/kyty_rt_probe
+            "$probe" --version
+            dest="qualification/$arm"
+            mkdir -p "$dest"
+            strip --strip-debug -o "$dest/kyty_rt_probe" "$probe"
+            ldd "$probe" | tee "$dest/ldd.txt"
+            if grep -q "not found" "$dest/ldd.txt"; then exit 1; fi
+            awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}' "$dest/ldd.txt" |
+              while IFS= read -r lib; do cp -L -- "$lib" "$dest/$(basename "$lib")"; done
+            printf '%s\n' "$sha" > "$dest/revision"
+          done
+          tar -C qualification -czf linux-rt-probes.tar.gz baseline candidate
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-rt-probes
+          path: linux-rt-probes.tar.gz
+          if-no-files-found: error
+          retention-days: 2
