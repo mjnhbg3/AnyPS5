@@ -1,11 +1,11 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineStoreFormat.h"
 
 #include "common/logging/log.h"
 #include "common/parallelFor.h"
 #include "common/stringUtils.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
-#include "graphics/shader/recompiler/ir/Serialize.h"
 
 #include <algorithm>
 #include <chrono>
@@ -37,13 +37,7 @@ using ShaderRecompiler::IR::IoAll;
 using ShaderRecompiler::IR::Reader;
 using ShaderRecompiler::IR::Writer;
 
-enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout };
-
-struct Frame {
-	uint32_t compressed_size = 0;
-	uint32_t raw_size        = 0;
-	uint64_t checksum        = 0;
-};
+using namespace ShaderStoreFormat;
 
 #if defined(ANYPS5_KYTY)
 uint64_t BuildStamp() {
@@ -105,27 +99,10 @@ std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
 		return {};
 	}
 	Writer header;
-	IoAll(header, stamp, SpirvProfile(graphics),
-	      graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);
+	const auto profile = SpirvProfile(graphics);
+	const auto limit = graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
+	IoStoreHeader(header, stamp, profile, limit);
 	return std::move(header.bytes);
-}
-
-template <class S, class Key> void IoKey(S& io, Key& key) {
-	auto& [stage, hash, user_data_count, static_state] = key;
-	IoAll(io, stage, hash, user_data_count, static_state);
-}
-
-template <class S, class Module> void IoModule(S& io, Module& stage) {
-#if defined(ANYPS5_KYTY)
-	auto& [id, handle, info, specialization, function_code, vertex_formats, rect_parameters,
-	       mesh_task, spirv_words, plain, guest_traversal, plan, pipeline_requested] = stage;
-	(void)pipeline_requested;
-#else
-	auto& [id, handle, info, specialization, function_code, vertex_formats, rect_parameters,
-	       mesh_task, spirv_words, plain, guest_traversal, plan] = stage;
-#endif
-	(void)plan;
-	IoAll(io, id, info, specialization, vertex_formats, rect_parameters, mesh_task, guest_traversal);
 }
 
 }
@@ -340,12 +317,8 @@ bool PipelineCache::ReadRecord(std::span<const uint8_t> frame_bytes, StoreRecord
 	Frame frame;
 	std::memcpy(&frame, frame_bytes.data(), sizeof(frame));
 	const auto compressed = frame_bytes.subspan(sizeof(frame), frame.compressed_size);
-	if (XXH3_64bits(compressed.data(), compressed.size()) != frame.checksum ||
-	    ZSTD_getFrameContentSize(compressed.data(), compressed.size()) != frame.raw_size) {
-		return false;
-	}
-	std::vector<uint8_t> raw(frame.raw_size);
-	if (ZSTD_decompress(raw.data(), raw.size(), compressed.data(), compressed.size()) != raw.size()) {
+	std::vector<uint8_t> raw;
+	if (!DecodeShaderStoreFrame(frame, compressed, raw)) {
 		return false;
 	}
 	Reader     reader {raw};
@@ -357,10 +330,7 @@ bool PipelineCache::ReadRecord(std::span<const uint8_t> frame_bytes, StoreRecord
 			auto&                 module = record.module;
 			std::vector<uint32_t> spirv;
 			std::vector<uint32_t> plain_spirv;
-			IoKey(reader, record.key);
-			IoAll(reader, plan);
-			IoModule(reader, module);
-			IoAll(reader, spirv, plain_spirv);
+			IoStoreModule(reader, record.key, module, plan, spirv, plain_spirv);
 			if (!complete()) {
 				return false;
 			}
@@ -424,10 +394,8 @@ void PipelineCache::StoreModule(const ProgramKey& key, const Program& program,
 	}
 	Writer record;
 	IoAll(record, Record::Module);
-	IoKey(record, key);
-	IoAll(record, ShaderRecompiler::IR::SaveResourcePlan(program.resource_plan));
-	IoModule(record, module);
-	IoAll(record, spirv, plain_spirv);
+	const auto plan = ShaderRecompiler::IR::SaveResourcePlan(program.resource_plan);
+	IoStoreModule(record, key, module, plan, spirv, plain_spirv);
 	m_store.Append(std::move(record.bytes));
 }
 
@@ -454,7 +422,7 @@ void PipelineCache::StoreLayout(uint64_t key, const ShaderTessellationInputInfo&
 
 std::vector<uint8_t> EncodeComputeModule(const ShaderModule& module, const std::vector<uint32_t>& spirv) {
 	Writer record;
-	IoModule(record, module);
+	IoStoreModuleInfo(record, module);
 	IoAll(record, spirv);
 	return std::move(record.bytes);
 }
@@ -462,7 +430,7 @@ std::vector<uint8_t> EncodeComputeModule(const ShaderModule& module, const std::
 bool DecodeComputeModule(std::span<const uint8_t> bytes, ShaderModule& module,
                          std::vector<uint32_t>& spirv) {
 	Reader reader {bytes};
-	IoModule(reader, module);
+	IoStoreModuleInfo(reader, module);
 	IoAll(reader, spirv);
 	module.spirv_words = static_cast<uint32_t>(spirv.size());
 	return reader.ok && reader.bytes.empty() && module.info.stage == ShaderType::Compute;
