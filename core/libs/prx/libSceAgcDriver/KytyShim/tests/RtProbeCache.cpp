@@ -90,6 +90,7 @@ void WriteSurveyFixture(const std::filesystem::path& directory) {
     constexpr std::array cacheOnly{0xf19c8f01u, 0x00000010u, 0xe0700000u, 0x80000000u, 0xbf810000u};
     constexpr std::array plain{0xbf810000u};
     constexpr std::array absent{0xbf800000u, 0xbf810000u};
+    constexpr std::array undecodable{0xbf800000u};
     constexpr std::array metadata{0xffffffffu, 2u};
     const auto drivenHash = XXH3_64bits(driven.data(), sizeof(driven));
     const auto cacheOnlyHash = XXH3_64bits(cacheOnly.data(), sizeof(cacheOnly));
@@ -98,6 +99,8 @@ void WriteSurveyFixture(const std::filesystem::path& directory) {
     const auto cache = "KTYCODE1" + Record(0, metadata) + Record(drivenHash, driven) + Record(plainHash, plain) +
                        Record(cacheOnlyHash, cacheOnly);
     WriteText(directory / "survey.code", cache);
+    const auto undecodableHash = XXH3_64bits(undecodable.data(), sizeof(undecodable));
+    WriteText(directory / "undecodable.code", "KTYCODE1" + Record(undecodableHash, undecodable) + Record(drivenHash, driven));
     WriteText(directory / "survey.kpm",
               "# kyty pipeline manifest v1\n"
               "M 000000000001 cs code=" + HexText(drivenHash) + " ud=11 t=32,1,1 wave=32 tid=1 wgr=11 gx sb=-\n"

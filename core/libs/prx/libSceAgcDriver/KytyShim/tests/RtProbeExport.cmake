@@ -126,6 +126,13 @@ if(stdout MATCHES "tlas_source=(refused|derived|incomplete)|tlas_reason=")
     message(FATAL_ERROR "kyty_rt_probe --all reported TLAS analysis with oracle disabled\n${stdout}")
 endif()
 
+execute_process(COMMAND "${probe}" --cache "${surveyDirectory}/undecodable.code" --all
+        RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+if(NOT result STREQUAL "0")
+    message(FATAL_ERROR "kyty_rt_probe --all stopped on an undecodable program with ${result}\n${stdout}\n${stderr}")
+endif()
+requireLine("summary records=2 manifest_modules=0 manifest_skipped=0 code_only=2 programs=2 intersections=2 missing_code=0 unreadable=0 undecodable=1 truncated=0 seconds=")
+
 execute_process(COMMAND "${probe}" --cache "${surveyDirectory}/blocked.code" --all
         RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
 if(NOT result STREQUAL "2" OR NOT stderr MATCHES "cannot open")
