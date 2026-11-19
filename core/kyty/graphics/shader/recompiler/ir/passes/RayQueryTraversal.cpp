@@ -5638,7 +5638,13 @@ NativeTraversals TraceNativeTraversals(Program& program, const NativeTraversalOp
 		for (auto* bvh: intersections) {
 			if (!inside(bvh->Parent())) left.push_back(bvh);
 		}
+		auto* analysis = left.empty() ? nullptr : options.tlas_source;
+		if (analysis != nullptr) analysis->intersections = left.size();
 		const auto derived = left.empty() ? OracleWalks {} : DeriveOracleWalks(program, left);
+		if (analysis != nullptr) {
+			analysis->completed = true;
+			analysis->refusal = derived.refusal;
+		}
 		if (!left.empty() && derived.refusal == nullptr) {
 			hypotheses   = derived.sources;
 			improvements = derived.improvements;

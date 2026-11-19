@@ -160,6 +160,8 @@ A game that uses ray tracing walks its acceleration structure in compute shaders
 
 The survey describes what AnyKyty does on a GPU with Vulkan ray queries (NVIDIA RTX, AMD RX 6000 and newer, Intel Arc); on any other GPU it emulates all ray tracing and there is nothing to survey. The report holds no game code and no file name of the game: for each program, only its fingerprint (a hash), its stage, wave size and workgroup size, the number of BVH intersections, how many of them are served each way and whether the translated SPIR-V validates; and the AnyKyty commit, your GPU and driver, and your operating system. Home folders, user names and host names are filtered out, and the command refuses to write a report that still holds a path of your machine. Read both files before you share them anyway.
 
+The report includes the outcome of TLAS source analysis when the probe supplies it. `refused` names the reason and the number of intersections the source analysis considered. `derived` means a source was found. `not_attempted` covers programs with no remaining walk for this analysis or an analysis disabled by the probe settings. `incomplete` means the analysis started before translation stopped. The report keeps the recorded or guessed input label for each program.
+
 1. **Update and build the probe.** Pull the current branch and its submodules and build the probe with the rest, from the folder you built AnyKyty in:
 
    ```sh

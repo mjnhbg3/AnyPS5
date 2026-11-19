@@ -17,12 +17,13 @@ ROWS = [
     "program 0198d95d18d42cb2 stage=cs wave=64 group=64,1,1 lds=0 scratch=0 modules=3 source=manifest status=ok "
     "bvh=12 native=0 oracle=12 lane=0 empty=0 emulated=0 spirv=valid",
     "program 1111111111111111 back=2222222222222222 stage=cs wave=32 group=8,4,1 lds=256 scratch=0 modules=1 source=manifest "
-    "status=ok bvh=7 native=3 oracle=1 lane=1 empty=1 emulated=1 spirv=invalid",
+    "status=ok bvh=7 native=3 oracle=1 lane=1 empty=1 emulated=1 spirv=invalid "
+    "tlas_source=refused tlas_sites=1 tlas_reason=no_intersection_reads_a_structure_named_by_the_user_data",
     "program 3333333333333333 stage=cs wave=64 group=8,8,1 lds=8192 scratch=16384 modules=0 source=code status=stop "
     "bvh=0 native=0 oracle=0 lane=0 empty=0 emulated=0 spirv=none phase=translate "
     "stop=resource_tracking:_hash=0x00112233aabbccdd_at_/home/someone/src/Tracking.cpp:772_C:\\\\Users\\\\someone\\\\x.cpp",
     "program 4444444444444444 stage=ps wave=64 group=0,0,0 lds=0 scratch=0 modules=0 source=code status=no_record "
-    "bvh=3 native=0 oracle=0 lane=0 empty=0 emulated=0 spirv=none",
+    "bvh=3 native=0 oracle=0 lane=0 empty=0 emulated=0 spirv=none tlas_source=not_attempted",
     "program 5555555555555555 stage=cs wave=64 group=64,1,1 lds=0 scratch=0 modules=2 source=manifest status=calls "
     "bvh=2 native=0 oracle=0 lane=0 empty=0 emulated=0 spirv=none",
 ]
@@ -84,6 +85,21 @@ class ParseTests(unittest.TestCase):
         self.assertIs(rows[1]["spirv"], False)
         self.assertIsNone(rows[2]["spirv"])
 
+    def test_tlas_source_diagnostics_preserve_attempts_and_old_rows(self):
+        _, rows, _, _ = rt_survey.parse_probe("\n".join(ROWS))
+        self.assertNotIn("tlasSource", rows[0])
+        self.assertEqual(rows[1]["tlasSource"], {
+            "status": "refused",
+            "intersections": 1,
+            "reason": "no_intersection_reads_a_structure_named_by_the_user_data",
+        })
+        self.assertEqual(rows[3]["tlasSource"], {"status": "not_attempted", "intersections": 0})
+
+        for status in ("derived", "incomplete"):
+            with self.subTest(status=status):
+                _, observed, _, _ = rt_survey.parse_probe(ROWS[0] + f" tlas_source={status} tlas_sites=12")
+                self.assertEqual(observed[0]["tlasSource"], {"status": status, "intersections": 12})
+
     def test_totals_split_by_source(self):
         _, rows, _, _ = rt_survey.parse_probe("\n".join(ROWS))
         totals = rt_survey.totals_of(rows)
@@ -126,6 +142,8 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(table[0][:16], "1111111111111111")
         self.assertIn("INVALID", table[0])
         self.assertIn("guessed inputs", text)
+        self.assertIn("TLAS source refused (1 examined) - no intersection reads a structure named by the user data", table[0])
+        self.assertIn("TLAS source not attempted", text)
 
 
 class SurveyTests(unittest.TestCase):

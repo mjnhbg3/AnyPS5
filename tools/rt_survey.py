@@ -371,6 +371,11 @@ def parse_probe(text):
                 row["back"] = fields["back"]
             if "phase" in fields:
                 row["phase"] = fields["phase"]
+            tlas_status = fields.get("tlas_source")
+            if tlas_status in ("not_attempted", "incomplete", "refused", "derived"):
+                row["tlasSource"] = {"status": tlas_status, "intersections": number(fields, "tlas_sites")}
+                if tlas_status == "refused" and "tlas_reason" in fields:
+                    row["tlasSource"]["reason"] = clean_stop(fields["tlas_reason"])
             if "stop" in fields:
                 row["stop"] = clean_stop(fields["stop"])
             rows.append(row)
@@ -497,6 +502,14 @@ def render_text(document, limit=60):
         lines.append(fmt_row([name for name, _, _ in COLUMNS]))
         for row in rows[:limit]:
             spirv = "-" if row["spirv"] is None else ("valid" if row["spirv"] else "INVALID")
+            status = row["status"] + ("" if row["source"] == "manifest" else " (guessed inputs)")
+            tlas = row.get("tlasSource")
+            if tlas:
+                status += " | TLAS source " + tlas["status"].replace("_", " ")
+                if tlas["intersections"]:
+                    status += f" ({tlas['intersections']} examined)"
+                if "reason" in tlas:
+                    status += " - " + tlas["reason"].replace("_", " ")
             lines.append(
                 fmt_row(
                     [
@@ -511,7 +524,7 @@ def render_text(document, limit=60):
                         row["empty"],
                         row["emulated"],
                         spirv,
-                        row["status"] + ("" if row["source"] == "manifest" else " (guessed inputs)"),
+                        status,
                     ]
                 )
             )

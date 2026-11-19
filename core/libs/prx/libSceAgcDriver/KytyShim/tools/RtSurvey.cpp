@@ -79,6 +79,7 @@ struct Row {
     std::uint32_t empty = 0;
     std::uint32_t emulated = 0;
     int spirv = -1;
+    IR::TlasSourceAnalysis tlasSource;
 };
 
 struct Decoded {
@@ -269,6 +270,7 @@ std::optional<Decoded> DecodeOnly(Prepared& prepared, const std::vector<std::uin
 void Probe(Prepared& prepared, const std::vector<std::uint32_t>& code, bool defaultSpecialization,
            const SurveySettings& settings, Row& row) {
     const char* phase = "prepare";
+    row.tlasSource = {};
     try {
         Common::SoftExitScope soft;
         auto source = Recompiler::PrepareShaderSource(code, prepared.options);
@@ -278,7 +280,7 @@ void Probe(Prepared& prepared, const std::vector<std::uint32_t>& code, bool defa
             return;
         }
         phase = "translate";
-        auto translated = Recompiler::TranslateProgram(source.decoded, prepared.options);
+        auto translated = Recompiler::TranslateProgram(source.decoded, prepared.options, &row.tlasSource);
         Count(translated.program, row);
         IR::ResourceSpecialization specialization = prepared.module.specialization;
         if (defaultSpecialization) {
@@ -326,6 +328,14 @@ void Print(const Row& row) {
                 row.fromManifest ? "manifest" : "code", row.status.c_str());
     std::printf(" bvh=%u native=%u oracle=%u lane=%u empty=%u emulated=%u spirv=%s", row.bvh, row.native, row.oracle, row.lane,
                 row.empty, row.emulated, row.spirv < 0 ? "none" : row.spirv == 0 ? "invalid" : "valid");
+    const auto& tlas = row.tlasSource;
+    if (tlas.intersections == 0) {
+        std::printf(" tlas_source=not_attempted");
+    } else {
+        const char* status = !tlas.completed ? "incomplete" : tlas.refusal != nullptr ? "refused" : "derived";
+        std::printf(" tlas_source=%s tlas_sites=%zu", status, tlas.intersections);
+        if (tlas.refusal != nullptr) std::printf(" tlas_reason=%s", Scrub(tlas.refusal).c_str());
+    }
     if (!row.phase.empty()) std::printf(" phase=%s", row.phase.c_str());
     if (!row.stop.empty()) std::printf(" stop=%s", row.stop.c_str());
     std::printf("\n");

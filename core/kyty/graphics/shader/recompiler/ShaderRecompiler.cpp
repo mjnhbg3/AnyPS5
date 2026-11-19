@@ -561,6 +561,12 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 }
 
 TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileOptions& options) {
+	return TranslateProgram(decoded, options, nullptr);
+}
+
+TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileOptions& options,
+                                 IR::TlasSourceAnalysis* tlas_source) {
+	if (tlas_source != nullptr) *tlas_source = {};
 	EXIT_IF(decoded.instructions.empty());
 	if (decoded.has_swap_pc) {
 		for (const auto& inst: decoded.instructions) {
@@ -700,7 +706,8 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 		    ir, {.wave_size = options.wave_size,
 		         .rewrite   = options.native_ray_tracing,
 		         .oracle    = options.native_ray_tracing ? options.rt_oracle : 0u,
-		         .decoded   = &decoded});
+		         .decoded   = &decoded,
+		         .tlas_source = tlas_source});
 		oracle_sources      = traced.oracle_sources;
 		oracle_improvements = traced.oracle_improvements;
 		if (traced.source_valid) {

@@ -107,6 +107,9 @@ bool                             NoteRayTracingProgram(RayTracingProgramKind kin
 const Decoder::Program& RefreshShaderSource(ShaderSource& source, const IR::SrtRuntime& runtime);
 [[nodiscard]] TranslateResult TranslateProgram(const Decoder::Program& decoded,
 	                                           const CompileOptions& options);
+[[nodiscard]] TranslateResult TranslateProgram(const Decoder::Program& decoded,
+	                                           const CompileOptions& options,
+	                                           IR::TlasSourceAnalysis* tlas_source);
 
 [[nodiscard]] TranslateResult TranslateProgram(std::span<const uint32_t> code,
                                                const CompileOptions& options);

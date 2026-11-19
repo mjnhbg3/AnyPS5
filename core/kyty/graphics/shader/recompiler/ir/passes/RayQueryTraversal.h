@@ -3,6 +3,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <array>
+#include <cstddef>
 #include <utility>
 #include <vector>
 
@@ -38,11 +39,18 @@ struct NativeTraversals {
 	std::vector<OracleImprovement>             oracle_improvements;
 };
 
+struct TlasSourceAnalysis {
+	std::size_t intersections = 0;
+	bool completed = false;
+	const char* refusal = nullptr;
+};
+
 struct NativeTraversalOptions {
 	uint32_t wave_size = 64;
 	bool rewrite = false;
 	uint32_t oracle = 0;
 	const Decoder::Program* decoded = nullptr;
+	TlasSourceAnalysis* tlas_source = nullptr;
 };
 
 [[nodiscard]] NativeTraversals TraceNativeTraversals(Program&                      program,
