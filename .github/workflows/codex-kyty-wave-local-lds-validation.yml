@@ -1,0 +1,91 @@
+name: Matched Kyty merged hull validation
+
+on:
+  push:
+    branches: [codex/kyty-wave-local-lds-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'mjnhbg3/AnyPS5'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      BASE: 82039de9258f3d7f769264af2d2c487c79e0ae43
+      ANYPS5_REQUIRE_VULKAN: 1
+      ANYPS5_NO_SHADER_CACHE: 1
+      VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
+      VK_LOADER_DEBUG: layer
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Initialize the pinned submodules
+        run: git submodule update --init --recursive --depth 1 --jobs 8
+      - name: Install the CI build toolchain
+        run: |
+          sudo curl -fsSL --retry 3 -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get -o Acquire::Retries=3 update -q
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            gcc-14 g++-14 clang-21 lld-21 llvm-21 cmake ninja-build pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxkbcommon-dev libwayland-dev libegl-dev libdecor-0-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxxf86vm-dev libudev-dev libdrm-dev libgbm-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libvulkan1 libvulkan-dev mesa-vulkan-drivers
+          echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
+      - name: Load pinned Vulkan validation
+        run: |
+          archive="$RUNNER_TEMP/vulkansdk-linux-x86_64-1.4.350.0.tar.xz"
+          curl --fail --silent --show-error --location --retry 3 --max-time 300 \
+            https://sdk.lunarg.com/sdk/download/1.4.350.0/linux/vulkansdk-linux-x86_64-1.4.350.0.tar.xz -o "$archive"
+          echo "b65f068ab36263559da49d7cacd7e7b9df23824ca8b68ccc522a2b06f5725df2  $archive" | sha256sum --check
+          tar -xJf "$archive" -C "$RUNNER_TEMP" \
+            1.4.350.0/x86_64/lib 1.4.350.0/x86_64/share/vulkan/explicit_layer.d
+          sdk="$RUNNER_TEMP/1.4.350.0/x86_64"
+          layer="$sdk/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json"
+          jq -e '.layer.api_version | . == "1.4.350"' "$layer"
+          icd=$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)
+          test -n "$icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$(dirname "$layer")" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$sdk/lib" >> "$GITHUB_ENV"
+      - name: Build and compare the same focused tests
+        run: |
+          candidate=$(git rev-parse HEAD^)
+          test "$(git rev-parse "$candidate^")" = "$BASE"
+          test "$(git diff --name-only "$candidate" HEAD)" = '.github/workflows/codex-kyty-wave-local-lds-validation.yml'
+          mapfile -t paths < <(git diff --name-only "$BASE" "$candidate")
+          test "${#paths[@]}" = 2
+          mkdir -p "$RUNNER_TEMP/merged-hull-evidence"
+          evidence="$RUNNER_TEMP/merged-hull-evidence"
+          printf 'base=%s\ncandidate=%s\n' "$BASE" "$candidate" | tee "$evidence/refs.txt"
+          sudo sysctl -w vm.unprivileged_userfaultfd=1 vm.max_map_count=2147483642 kernel.core_pattern=core
+          ulimit -c 0
+          git restore --source="$BASE" --worktree -- "${paths[@]}"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 -DANYPS5_GPU_BACKEND=kyty \
+            -DANYPS5_KYTY_THIN_LTO=OFF -DANYPS5_KYTY_JOBS="$(nproc)"
+          for side in baseline candidate; do
+            if [ "$side" = candidate ]; then git restore --source="$candidate" --worktree -- "${paths[@]}"; fi
+            cmake --build build --target kyty_shim_merged_hull_tests kyty_shim_cache_topology_tests \
+              --parallel "$(nproc)" 2>&1 | tee "$evidence/$side-build.log"
+            ctest --test-dir build -R '^kyty_shim_(merged_hull(_draw)?|cache_topology)$' -V --no-tests=error \
+              2>&1 | tee "$evidence/$side-ctest.log"
+            log="$evidence/$side-ctest.log"
+            grep -F 'Insert instance layer "VK_LAYER_KHRONOS_validation"' "$log"
+            if grep -F -e 'was not found but was requested by env var VK_INSTANCE_LAYERS' -e '***Skipped' "$log"; then exit 1; fi
+            grep -F 'kyty_shim_merged_hull_draw: ok' "$log"
+            grep -F '100% tests passed, 0 tests failed out of 3' "$log"
+            { grep -oE 'VUID-[a-zA-Z0-9_-]+' "$log" || test "$?" = 1; } | sort > "$evidence/$side-vuids.txt"
+          done
+          comm -13 "$evidence/baseline-vuids.txt" "$evidence/candidate-vuids.txt" | tee "$evidence/new-vuids.txt"
+          test ! -s "$evidence/new-vuids.txt"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: matched-merged-hull-results
+          path: ${{ runner.temp }}/merged-hull-evidence
+          retention-days: 7
