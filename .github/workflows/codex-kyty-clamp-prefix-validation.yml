@@ -1,0 +1,173 @@
+name: Matched Kyty range clamp validation
+
+on:
+  push:
+    branches: ['codex/kyty-clamp-prefix-validation*']
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'mjnhbg3/AnyPS5'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      BASE: 82039de9258f3d7f769264af2d2c487c79e0ae43
+      ANYPS5_REQUIRE_VULKAN: 1
+      ANYPS5_NO_SHADER_CACHE: 1
+      VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
+      VK_LOADER_DEBUG: layer
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Initialize the pinned submodules
+        run: git submodule update --init --recursive --depth 1 --jobs 8
+      - name: Install the CI build toolchain
+        run: |
+          sudo curl -fsSL --retry 3 -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get -o Acquire::Retries=3 update -q
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            gcc-14 g++-14 clang-21 lld-21 llvm-21 cmake ninja-build pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxkbcommon-dev libwayland-dev libegl-dev libdecor-0-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxinerama-dev libxss-dev libxxf86vm-dev libudev-dev libdrm-dev libgbm-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libvulkan1 libvulkan-dev mesa-vulkan-drivers
+          echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
+      - name: Load pinned Vulkan validation
+        run: |
+          archive="$RUNNER_TEMP/vulkansdk-linux-x86_64-1.4.350.0.tar.xz"
+          curl --fail --silent --show-error --location --retry 3 --max-time 300 \
+            https://sdk.lunarg.com/sdk/download/1.4.350.0/linux/vulkansdk-linux-x86_64-1.4.350.0.tar.xz -o "$archive"
+          echo "b65f068ab36263559da49d7cacd7e7b9df23824ca8b68ccc522a2b06f5725df2  $archive" | sha256sum --check
+          tar -xJf "$archive" -C "$RUNNER_TEMP" \
+            1.4.350.0/x86_64/lib 1.4.350.0/x86_64/share/vulkan/explicit_layer.d
+          sdk="$RUNNER_TEMP/1.4.350.0/x86_64"
+          layer="$sdk/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json"
+          jq -e '.layer.api_version | . == "1.4.350"' "$layer"
+          icd=$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)
+          test -n "$icd"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$(dirname "$layer")" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$sdk/lib" >> "$GITHUB_ENV"
+      - name: Build and run strict Vulkan and memory tests in both arms
+        run: |
+          candidate=$(git rev-parse HEAD^)
+          test "$(git rev-parse "$candidate^")" = "$BASE"
+          test "$(git diff --name-only "$candidate" HEAD)" = '.github/workflows/codex-kyty-clamp-prefix-validation.yml'
+          mapfile -t paths < <(git diff --name-only "$BASE" "$candidate")
+          test "${#paths[@]}" = 2
+          evidence="$RUNNER_TEMP/clamp-evidence"
+          mkdir -p "$evidence"
+          printf 'base=%s\ncandidate=%s\n' "$BASE" "$candidate" | tee "$evidence/refs.txt"
+          { uname -a; lscpu; } > "$evidence/host.txt"
+          sudo sysctl -w vm.unprivileged_userfaultfd=1 vm.max_map_count=2147483642 kernel.core_pattern=core
+          ulimit -c 0
+          git restore --source="$BASE" --worktree -- "${paths[@]}"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 -DANYPS5_GPU_BACKEND=kyty \
+            -DANYPS5_KYTY_THIN_LTO=OFF -DANYPS5_KYTY_JOBS="$(nproc)"
+          for side in baseline candidate; do
+            if [ "$side" = candidate ]; then git restore --source="$candidate" --worktree -- "${paths[@]}"; fi
+            cmake --build build --target kyty_shim_merged_hull_tests kyty_shim_memory_tests \
+              --parallel "$(nproc)" 2>&1 | tee "$evidence/$side-build.log"
+            ctest --test-dir build -R '^kyty_shim_(merged_hull(_draw)?|memory(_plain_reads|_sparse_reads_switch)?)$' \
+              -V --no-tests=error 2>&1 | tee "$evidence/$side-ctest.log"
+            log="$evidence/$side-ctest.log"
+            grep -F 'Insert instance layer "VK_LAYER_KHRONOS_validation"' "$log"
+            if grep -F -e 'was not found but was requested by env var VK_INSTANCE_LAYERS' -e '***Skipped' "$log"; then exit 1; fi
+            grep -F 'kyty_shim_merged_hull_draw: ok' "$log"
+            grep -F '100% tests passed, 0 tests failed out of 5' "$log"
+            { grep -oE 'VUID-[a-zA-Z0-9_-]+' "$log" || test "$?" = 1; } | sort > "$evidence/$side-vuids.txt"
+          done
+          comm -13 "$evidence/baseline-vuids.txt" "$evidence/candidate-vuids.txt" | tee "$evidence/new-vuids.txt"
+          test ! -s "$evidence/new-vuids.txt"
+      - name: Measure identical synthetic buffer-range workloads
+        run: |
+          evidence="$RUNNER_TEMP/clamp-evidence"
+          export CLAMP_EVIDENCE="$evidence"
+          testfile=core/libs/prx/libSceAgcDriver/KytyShim/src/MemoryTests.cpp
+          runtime=core/libs/prx/libSceAgcDriver/KytyShim/src/MemoryBacking.cpp
+          candidate=$(git rev-parse HEAD^)
+          for side in baseline candidate; do
+            if [ "$side" = baseline ]; then ref=$BASE; else ref=$candidate; fi
+            git restore --source="$ref" --worktree -- "$testfile" "$runtime"
+            python3 - "$testfile" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          anchor = 'int main() {\n    setenv("APS5_HEAP_CACHE_MIB", "0", 1);\n    Require(Libs::LibKernel::Memory::Shim::ViewEnabled());\n'
+          fixture = r'''
+              if (std::getenv("ANYKYTY_CLAMP_BENCH") != nullptr) {
+                  constexpr std::size_t request = 0x7f000000;
+                  constexpr std::size_t prefix = 0x16c0000;
+                  constexpr int calls = 6572;
+                  void* range = GuestArena::GuestArenaAllocate_nid_postfix(request, Page);
+                  Require(range != nullptr);
+                  GuestArena::GuestArenaCommit_nid_postfix(range, prefix, 0x04, prefix);
+                  for (int i = 0; i < 64; ++i) Require(Memory::ClampRangeSize(Address(range), request) == prefix);
+                  const auto start = std::chrono::steady_clock::now();
+                  for (int i = 0; i < calls; ++i) Require(Memory::ClampRangeSize(Address(range), request) == prefix);
+                  const auto elapsed = std::chrono::steady_clock::now() - start;
+                  const auto started_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count();
+                  const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+                  std::printf("clamp-bench %d %lld %lld\n", calls, static_cast<long long>(started_ns), static_cast<long long>(elapsed_ns));
+                  GuestArena::GuestArenaRelease_nid_postfix(range, request);
+                  return 0;
+              }
+          '''
+          assert text.count(anchor) == 1
+          path.write_text(text.replace(anchor, anchor + fixture))
+          PY
+            cmake --build build --target kyty_shim_memory_tests --parallel "$(nproc)" >> "$evidence/$side-bench-build.log" 2>&1
+            cp build/tests/kyty_shim_memory_tests "build/tests/kyty_shim_memory_bench-$side"
+          done
+          python3 - <<'PY'
+          import gzip
+          import json
+          import os
+          import re
+          import statistics
+          import subprocess
+          import time
+          from pathlib import Path
+
+          evidence = Path(os.environ['CLAMP_EVIDENCE'])
+          results = {'baseline': [], 'candidate': []}
+          origin_ns = time.monotonic_ns()
+          env = {**os.environ, 'ANYKYTY_CLAMP_BENCH': '1'}
+          for trial in range(6):
+              order = ('baseline', 'candidate') if trial % 2 == 0 else ('candidate', 'baseline')
+              for side in order:
+                  result = subprocess.run([f'build/tests/kyty_shim_memory_bench-{side}'], env=env, check=True, capture_output=True, text=True)
+                  match = re.search(r'^clamp-bench (\d+) (\d+) (\d+)$', result.stdout, re.MULTILINE)
+                  if match is None:
+                      raise ValueError(result.stdout + result.stderr)
+                  count, started_ns, elapsed_ns = map(int, match.groups())
+                  assert count == 6572 and started_ns >= origin_ns and elapsed_ns > 0
+                  results[side].append({'trial': trial + 1, 'calls': count, 'elapsed_ns': elapsed_ns, 'sample_start_ns': started_ns - origin_ns})
+
+          for side, rows in results.items():
+              events = [{'name': 'thread_name', 'ph': 'M', 'pid': 1, 'tid': 1, 'args': {'name': 'ClampRangeSize fixture'}}]
+              events += [{'name': 'ClampRangeSize batch', 'ph': 'X', 'pid': 1, 'tid': 1, 'ts': row['sample_start_ns'] / 1000,
+                          'dur': row['elapsed_ns'] / 1000, 'args': {'calls': row['calls'], 'trial': row['trial']}}
+                         for row in rows]
+              with gzip.open(evidence / f'{side}-cpu-fixture.json.gz', 'wt', encoding='utf-8') as output:
+                  json.dump({'traceEvents': events}, output)
+              median = statistics.median(row['elapsed_ns'] / row['calls'] for row in rows)
+              print(f'{side}: median {median / 1000:.2f} us/call over {len(rows)} matched samples')
+          (evidence / 'paired-cpu-fixture.json').write_text(json.dumps(results, indent=2) + '\n')
+          PY
+          for side in baseline candidate; do
+            python3 tools/trace_digest.py "$evidence/$side-cpu-fixture.json.gz" --json > "$evidence/$side-cpu-digest.json"
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: matched-range-clamp-results
+          path: ${{ runner.temp }}/clamp-evidence
+          retention-days: 7
